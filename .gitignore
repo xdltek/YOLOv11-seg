@@ -1,0 +1,9 @@
+build/
+*.onnx
+weights/*.onnx
+*.o
+*.so
+*.bc
+*.cui
+*_sass
+*_smp
