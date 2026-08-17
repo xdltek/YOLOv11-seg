@@ -113,6 +113,10 @@ private:
                                    int source_width,
                                    int source_height,
                                    Segmentation& segment) const;
+    void buildMaskFromBoxBinary(const float* box_mask,
+                                int box_width,
+                                int box_height,
+                                Segmentation& segment) const;
     void buildMask(const Candidate& candidate, const LetterboxInfo& letterbox, Segmentation& segment) const;
     bool ensureDeviceBuffer(void** buffer, size_t* capacity, size_t required_bytes);
     bool ensureSramBuffer(void** buffer, size_t* capacity, size_t required_bytes);

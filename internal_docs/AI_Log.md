@@ -15,6 +15,7 @@
 | 2026-08-17 | SEG Mask Precision Fix | build/output 中 mask 标记精度偏低、偏差几十像素 | 将 source-size mask kernel 从 low-res binary nearest resize 改为 raw-mask fixed-point bilinear resize，并在 source-space threshold/crop；保持 letterbox-aware 整数参数以适配 RPP assembler | TODO: target-board parity validation against regenerated outputs | Build passed; no RPP runtime script executed | TBD | local workspace |
 | 2026-08-17 | Postprocess Accuracy Test | 对后处理做精度测试验证 | 在 `yolov11_seg_postprocess_test` 新增 `--accuracy-check` 模式，使用同一份 detection/prototype tensor 构建 CPU OpenCV reference，并打印 box IoU、box 坐标差、mask IoU、mask 像素差比例和 PASS/FAIL 汇总；synthetic tensor RPP 验证 PASS，`min_box_iou=1.000000`，`min_mask_iou=0.999110`，`max_mask_diff_ratio=0.000105` | TODO: run with real model output dumps | Build and synthetic RPP accuracy validation passed | TBD | local workspace |
 | 2026-08-17 | Postprocess Perf Analysis | 驱动 perf 已在 `/tmp/rpp` 打开；开启代码 perf 并分析后处理热点 | 为 standalone postprocess test 增加 `--perf` 构建开关、代码侧 rpp_perf session、后处理细分计时；RPP synthetic 20-loop 平均 `profile_total_ms=189.352`，主要热点为 source resize/crop kernel `37.036 ms`、source mask copy `48.943 ms`、selected box 小拷贝 `32.189 ms`、split D2H `35.879 ms` | TODO: implement ROI/batched source mask kernel, eliminate det/coeff D2H with RT_NMS, reduce dense mask D2H volume | Perf run passed; optimization plan ready | TBD | local workspace |
+| 2026-08-17 | Postprocess ROI Optimization | 当前代码已归档到本地分支 `jcy_test` 后，按优化方案验证后处理性能 | 提交归档点 `3410dc1`；移除未使用的 lowres threshold 调用，将 selected boxes 一次性上传，新增 RPP bbox-local bilinear mask kernel，输出 `box.width x box.height` local mask，并更新 visualization/accuracy compare；RPP synthetic 20-loop PASS，`profile_total_ms=130.556`，`mask_decode_ms=85.521`，`mask_source_resize_crop_ms=4.830`，`mask_source_copy_ms=38.778`，`min_mask_iou=0.999110` | TODO: next optimize det/coeff D2H via RT_NMS and reduce remaining D2H/host blocking | Build and RPP accuracy/perf validation passed | TBD | local workspace |
 
 ## Notes
 
@@ -32,5 +33,6 @@
 - `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check` passed on RPP with synthetic tensors.
 - `scripts/build_postprocess_test.sh --perf` passed.
 - `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check` passed with perf-enabled build; code trace `/home/azurengine/github/trace/yolov11_seg_postprocess_test_37406.json`, driver trace `/tmp/rpp/rpp_trace_37406.json`.
+- `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check` passed after ROI/local mask optimization; code trace `/home/azurengine/github/trace/yolov11_seg_postprocess_test_42047.json`, driver trace `/tmp/rpp/rpp_trace_42047.json`.
 - `scripts/run.sh --demo rgb --loop 1` could not run because `rpp_server` reported `no RPP device found`.
 - `scripts/run_postprocess_test.sh --loop 1 --warmup 0` could not run because `rpp_server` reported `no RPP device found`.

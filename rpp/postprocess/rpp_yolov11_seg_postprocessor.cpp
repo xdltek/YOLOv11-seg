@@ -509,32 +509,35 @@ bool YoloV11SegPostprocessor::runRppMaskDecode(const void* prototype_output_devi
     size_t raw_masks_bytes = static_cast<size_t>(segment_count) *
                              raw_mask_elements_per_segment *
                              sizeof(float);
-    size_t binary_masks_bytes = static_cast<size_t>(segment_count) *
-                                raw_mask_elements_per_segment *
-                                sizeof(float);
-    size_t source_mask_elements = static_cast<size_t>(letterbox.source_width) *
-                                  static_cast<size_t>(letterbox.source_height);
-    size_t source_mask_bytes = source_mask_elements * sizeof(float);
     size_t selected_indices_bytes = static_cast<size_t>(segment_count) * sizeof(int);
-    size_t selected_box_bytes = 4U * sizeof(int);
+    size_t selected_box_bytes = static_cast<size_t>(segment_count) * 4U * sizeof(int);
 
     host_selected_anchor_indices_.assign(static_cast<size_t>(segment_count), 0);
-    host_selected_box_.assign(4U, 0);
-    host_source_mask_.assign(source_mask_elements, 0);
+    host_selected_box_.assign(static_cast<size_t>(segment_count) * 4U, 0);
 
     // TODO(postprocess-rpp-det-nms): replace CPU decode/NMS with the YOLOv11 det RT_NMS
     // path once it can return selected anchor indices for the SEG coefficient gather below.
+    size_t max_box_mask_elements = 0;
     for (int i = 0; i < segment_count; ++i) {
         const Candidate& candidate = candidates[static_cast<size_t>(keep[static_cast<size_t>(i)])];
         host_selected_anchor_indices_[static_cast<size_t>(i)] = candidate.anchor;
+        size_t box_offset = static_cast<size_t>(i) * 4U;
+        host_selected_box_[box_offset + 0U] = candidate.box.x;
+        host_selected_box_[box_offset + 1U] = candidate.box.y;
+        host_selected_box_[box_offset + 2U] = candidate.box.width;
+        host_selected_box_[box_offset + 3U] = candidate.box.height;
+        max_box_mask_elements = std::max(max_box_mask_elements,
+                                         static_cast<size_t>(candidate.box.width) *
+                                         static_cast<size_t>(candidate.box.height));
     }
+    size_t source_mask_bytes = max_box_mask_elements * sizeof(float);
+    host_source_mask_.assign(max_box_mask_elements, 0);
 
     if (!ensureSramBuffer(&prototype_sram_, &prototype_sram_capacity_, prototype_bytes) ||
         !ensureSramBuffer(&coefficients_sram_, &coefficients_sram_capacity_, coeff_bytes) ||
         !ensureSramBuffer(&raw_masks_sram_, &raw_masks_sram_capacity_, raw_masks_bytes) ||
         !ensureDeviceBuffer(&selected_indices_device_, &selected_indices_device_capacity_, selected_indices_bytes) ||
         !ensureSramBuffer(&selected_indices_sram_, &selected_indices_sram_capacity_, selected_indices_bytes) ||
-        !ensureSramBuffer(&binary_masks_sram_, &binary_masks_sram_capacity_, binary_masks_bytes) ||
         !ensureDeviceBuffer(&selected_box_device_, &selected_box_device_capacity_, selected_box_bytes) ||
         !ensureSramBuffer(&selected_box_sram_, &selected_box_sram_capacity_, selected_box_bytes) ||
         !ensureDeviceBuffer(&source_mask_device_, &source_mask_device_capacity_, source_mask_bytes) ||
@@ -560,7 +563,17 @@ bool YoloV11SegPostprocessor::runRppMaskDecode(const void* prototype_output_devi
                                 selected_indices_device_,
                                 selected_indices_bytes,
                                 rtMemcpyDeviceToSram),
-                       "rtMemcpy selected anchor indices DDR to SRAM");
+                       "rtMemcpy selected anchor indices DDR to SRAM") &&
+              check_rt(rtMemcpy(selected_box_device_,
+                                host_selected_box_.data(),
+                                selected_box_bytes,
+                                rtMemcpyHostToDevice),
+                       "rtMemcpy selected boxes H2D") &&
+              check_rt(rtMemcpy(selected_box_sram_,
+                                selected_box_device_,
+                                selected_box_bytes,
+                                rtMemcpyDeviceToSram),
+                       "rtMemcpy selected boxes DDR to SRAM");
     if (profile != nullptr) {
         profile->mask_setup_copy_ms = elapsed_ms(detail_start);
     }
@@ -595,22 +608,6 @@ bool YoloV11SegPostprocessor::runRppMaskDecode(const void* prototype_output_devi
             profile->mask_proto_combine_ms = elapsed_ms(detail_start);
         }
     }
-    if (ok) {
-        detail_start = ProfileClock::now();
-        launch_yolov11_seg_sigmoid_threshold_lowres(stream,
-                                                    static_cast<const float*>(raw_masks_sram_),
-                                                    static_cast<float*>(binary_masks_sram_),
-                                                    segment_count,
-                                                    prototype_height_,
-                                                    prototype_width_,
-                                                    std::log(std::max(1.0e-6f, config_.mask_threshold) /
-                                                             std::max(1.0e-6f, 1.0f - config_.mask_threshold)));
-        ok = check_rt(rtGetLastError(), "RPP YOLOv11-SEG low-res threshold kernel launch") &&
-             check_rt(rtStreamSynchronize(stream), "rtStreamSynchronize low-res threshold");
-        if (profile != nullptr) {
-            profile->mask_lowres_threshold_ms = elapsed_ms(detail_start);
-        }
-    }
     if (!ok) {
         check_rt(rtStreamDestroy(stream), "rtStreamDestroy YOLOv11-SEG mask decode");
         return false;
@@ -619,57 +616,46 @@ bool YoloV11SegPostprocessor::runRppMaskDecode(const void* prototype_output_devi
     segments.reserve(static_cast<size_t>(segment_count));
     for (int i = 0; i < segment_count; ++i) {
         const Candidate& candidate = candidates[static_cast<size_t>(keep[static_cast<size_t>(i)])];
-        host_selected_box_[0] = candidate.box.x;
-        host_selected_box_[1] = candidate.box.y;
-        host_selected_box_[2] = candidate.box.width;
-        host_selected_box_[3] = candidate.box.height;
 
         const float* raw_mask = static_cast<const float*>(raw_masks_sram_) +
                                 static_cast<size_t>(i) * raw_mask_elements_per_segment;
-        detail_start = ProfileClock::now();
-        ok = check_rt(rtMemcpy(selected_box_device_,
-                               host_selected_box_.data(),
-                               selected_box_bytes,
-                               rtMemcpyHostToDevice),
-                      "rtMemcpy selected box H2D") &&
-             check_rt(rtMemcpy(selected_box_sram_,
-                               selected_box_device_,
-                               selected_box_bytes,
-                               rtMemcpyDeviceToSram),
-                      "rtMemcpy selected box DDR to SRAM");
-        if (profile != nullptr) {
-            profile->mask_box_copy_ms += elapsed_ms(detail_start);
-        }
+        const int* selected_box_sram = static_cast<const int*>(selected_box_sram_) +
+                                       static_cast<size_t>(i) * 4U;
         if (ok) {
             detail_start = ProfileClock::now();
-            launch_yolov11_seg_resize_raw_to_source_crop(stream,
-                                                         raw_mask,
-                                                         static_cast<const int*>(selected_box_sram_),
-                                                         static_cast<float*>(source_mask_sram_),
-                                                         letterbox.source_height,
-                                                         letterbox.source_width,
-                                                         letterbox.model_height,
-                                                         letterbox.model_width,
-                                                         prototype_height_,
-                                                         prototype_width_,
-                                                         letterbox.resized_height,
-                                                         letterbox.resized_width,
-                                                         static_cast<int>(std::round(letterbox.pad_y)),
-                                                         static_cast<int>(std::round(letterbox.pad_x)),
-                                                         std::log(std::max(1.0e-6f, config_.mask_threshold) /
-                                                                 std::max(1.0e-6f, 1.0f - config_.mask_threshold)));
-            ok = check_rt(rtGetLastError(), "RPP YOLOv11-SEG source resize/crop kernel launch") &&
-                 check_rt(rtStreamSynchronize(stream), "rtStreamSynchronize source resize/crop");
+            launch_yolov11_seg_resize_raw_to_box_mask(stream,
+                                                       raw_mask,
+                                                       selected_box_sram,
+                                                       static_cast<float*>(source_mask_sram_),
+                                                       candidate.box.height,
+                                                       candidate.box.width,
+                                                       letterbox.source_height,
+                                                       letterbox.source_width,
+                                                       letterbox.model_height,
+                                                       letterbox.model_width,
+                                                       prototype_height_,
+                                                       prototype_width_,
+                                                       letterbox.resized_height,
+                                                       letterbox.resized_width,
+                                                       static_cast<int>(std::round(letterbox.pad_y)),
+                                                       static_cast<int>(std::round(letterbox.pad_x)),
+                                                       std::log(std::max(1.0e-6f, config_.mask_threshold) /
+                                                               std::max(1.0e-6f, 1.0f - config_.mask_threshold)));
+            ok = check_rt(rtGetLastError(), "RPP YOLOv11-SEG box resize/crop kernel launch") &&
+                 check_rt(rtStreamSynchronize(stream), "rtStreamSynchronize box resize/crop");
             if (profile != nullptr) {
                 profile->mask_source_resize_crop_ms += elapsed_ms(detail_start);
             }
         }
         if (ok) {
             detail_start = ProfileClock::now();
-            ok = check_rt(rtMemcpy(source_mask_device_, source_mask_sram_, source_mask_bytes, rtMemcpySramToDevice),
-                          "rtMemcpy source mask SRAM to DDR") &&
-                 check_rt(rtMemcpy(host_source_mask_.data(), source_mask_device_, source_mask_bytes, rtMemcpyDeviceToHost),
-                          "rtMemcpy source mask D2H");
+            size_t box_mask_elements = static_cast<size_t>(candidate.box.width) *
+                                       static_cast<size_t>(candidate.box.height);
+            size_t box_mask_bytes = box_mask_elements * sizeof(float);
+            ok = check_rt(rtMemcpy(source_mask_device_, source_mask_sram_, box_mask_bytes, rtMemcpySramToDevice),
+                          "rtMemcpy box mask SRAM to DDR") &&
+                 check_rt(rtMemcpy(host_source_mask_.data(), source_mask_device_, box_mask_bytes, rtMemcpyDeviceToHost),
+                          "rtMemcpy box mask D2H");
             if (profile != nullptr) {
                 profile->mask_source_copy_ms += elapsed_ms(detail_start);
             }
@@ -684,10 +670,10 @@ bool YoloV11SegPostprocessor::runRppMaskDecode(const void* prototype_output_devi
         segment.confidence = candidate.score;
         segment.box = candidate.box;
         detail_start = ProfileClock::now();
-        buildMaskFromSourceBinary(host_source_mask_.data(),
-                                  letterbox.source_width,
-                                  letterbox.source_height,
-                                  segment);
+        buildMaskFromBoxBinary(host_source_mask_.data(),
+                               candidate.box.width,
+                               candidate.box.height,
+                               segment);
         if (profile != nullptr) {
             profile->mask_build_cpu_ms += elapsed_ms(detail_start);
         }
@@ -699,7 +685,14 @@ bool YoloV11SegPostprocessor::runRppMaskDecode(const void* prototype_output_devi
     if (profile != nullptr) {
         profile->mask_decode_ms = elapsed_ms(stage_start);
         profile->device_to_host_ms += profile->mask_source_copy_ms;
-        profile->device_to_host_bytes += static_cast<size_t>(segment_count) * source_mask_bytes;
+        size_t total_box_mask_bytes = 0;
+        for (int i = 0; i < segment_count; ++i) {
+            const Candidate& candidate = candidates[static_cast<size_t>(keep[static_cast<size_t>(i)])];
+            total_box_mask_bytes += static_cast<size_t>(candidate.box.width) *
+                                    static_cast<size_t>(candidate.box.height) *
+                                    sizeof(float);
+        }
+        profile->device_to_host_bytes += total_box_mask_bytes;
     }
     return true;
 }
@@ -889,6 +882,30 @@ void YoloV11SegPostprocessor::buildMaskFromSourceBinary(const float* source_mask
     segment.mask_width = source_u8.cols;
     segment.mask_height = source_u8.rows;
     segment.mask.assign(source_u8.datastart, source_u8.dataend);
+}
+
+void YoloV11SegPostprocessor::buildMaskFromBoxBinary(const float* box_mask,
+                                                     int box_width,
+                                                     int box_height,
+                                                     Segmentation& segment) const
+{
+    if (box_mask == nullptr || box_width <= 0 || box_height <= 0) {
+        return;
+    }
+
+    cv::Mat box_f32(box_height,
+                    box_width,
+                    CV_32FC1,
+                    const_cast<float*>(box_mask));
+    cv::Mat box_u8;
+    box_f32.convertTo(box_u8, CV_8UC1);
+    if (cv::countNonZero(box_u8) == 0) {
+        return;
+    }
+
+    segment.mask_width = box_u8.cols;
+    segment.mask_height = box_u8.rows;
+    segment.mask.assign(box_u8.datastart, box_u8.dataend);
 }
 
 bool YoloV11SegPostprocessor::ensureDeviceBuffer(void** buffer, size_t* capacity, size_t required_bytes)

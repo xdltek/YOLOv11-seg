@@ -62,6 +62,23 @@ void draw_segmentations(cv::Mat& image,
                 }
             }
         }
+        else if (segment.mask_width == box.width &&
+                 segment.mask_height == box.height &&
+                 segment.mask.size() == static_cast<size_t>(box.width * box.height)) {
+            for (int y = 0; y < box.height; ++y) {
+                const uint8_t* mask_row = segment.mask.data() + static_cast<size_t>(y) * static_cast<size_t>(box.width);
+                cv::Vec3b* image_row = image.ptr<cv::Vec3b>(box.y + y);
+                for (int x = 0; x < box.width; ++x) {
+                    if (mask_row[x] == 0) {
+                        continue;
+                    }
+                    int image_x = box.x + x;
+                    image_row[image_x][0] = static_cast<uint8_t>(0.55f * image_row[image_x][0] + 0.45f * color[0]);
+                    image_row[image_x][1] = static_cast<uint8_t>(0.55f * image_row[image_x][1] + 0.45f * color[1]);
+                    image_row[image_x][2] = static_cast<uint8_t>(0.55f * image_row[image_x][2] + 0.45f * color[2]);
+                }
+            }
+        }
         cv::rectangle(image, box, color, 3);
 
         int label_top = std::max(0, box.y - 20);

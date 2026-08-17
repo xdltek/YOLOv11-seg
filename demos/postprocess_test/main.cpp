@@ -350,24 +350,93 @@ void build_reference_segments(const std::vector<float>& detection,
     }
 }
 
+bool mask_is_box_local(const Segmentation& segment)
+{
+    return segment.mask_width == segment.box.width &&
+           segment.mask_height == segment.box.height &&
+           segment.mask.size() == static_cast<size_t>(segment.box.width * segment.box.height);
+}
+
+uint8_t mask_value_at_source(const Segmentation& segment, int x, int y)
+{
+    if (segment.mask.empty() || segment.mask_width <= 0 || segment.mask_height <= 0) {
+        return 0;
+    }
+    if (mask_is_box_local(segment)) {
+        int local_x = x - segment.box.x;
+        int local_y = y - segment.box.y;
+        if (local_x < 0 || local_y < 0 ||
+            local_x >= segment.mask_width || local_y >= segment.mask_height) {
+            return 0;
+        }
+        return segment.mask[static_cast<size_t>(local_y) * static_cast<size_t>(segment.mask_width) +
+                            static_cast<size_t>(local_x)];
+    }
+    if (x < 0 || y < 0 || x >= segment.mask_width || y >= segment.mask_height ||
+        segment.mask.size() != static_cast<size_t>(segment.mask_width * segment.mask_height)) {
+        return 0;
+    }
+    return segment.mask[static_cast<size_t>(y) * static_cast<size_t>(segment.mask_width) +
+                        static_cast<size_t>(x)];
+}
+
+void comparison_canvas(const Segmentation& a,
+                       const Segmentation& b,
+                       int& width,
+                       int& height,
+                       cv::Rect& region)
+{
+    bool a_local = mask_is_box_local(a);
+    bool b_local = mask_is_box_local(b);
+    width = 0;
+    height = 0;
+    if (!a_local) {
+        width = std::max(width, a.mask_width);
+        height = std::max(height, a.mask_height);
+    }
+    if (!b_local) {
+        width = std::max(width, b.mask_width);
+        height = std::max(height, b.mask_height);
+    }
+    if (width > 0 && height > 0) {
+        region = cv::Rect(0, 0, width, height);
+        return;
+    }
+
+    int x0 = std::min(a.box.x, b.box.x);
+    int y0 = std::min(a.box.y, b.box.y);
+    int x1 = std::max(a.box.x + a.box.width, b.box.x + b.box.width);
+    int y1 = std::max(a.box.y + a.box.height, b.box.y + b.box.height);
+    width = std::max(0, x1);
+    height = std::max(0, y1);
+    region = cv::Rect(std::max(0, x0),
+                      std::max(0, y0),
+                      std::max(0, x1 - std::max(0, x0)),
+                      std::max(0, y1 - std::max(0, y0)));
+}
+
 float mask_iou(const Segmentation& a, const Segmentation& b)
 {
-    if (a.mask_width != b.mask_width || a.mask_height != b.mask_height ||
-        a.mask.empty() || b.mask.empty()) {
+    if (a.mask.empty() || b.mask.empty()) {
         return 0.0f;
     }
 
+    int canvas_width = 0;
+    int canvas_height = 0;
+    cv::Rect region;
+    comparison_canvas(a, b, canvas_width, canvas_height, region);
     int intersection = 0;
     int union_count = 0;
-    size_t pixels = a.mask.size();
-    for (size_t i = 0; i < pixels; ++i) {
-        bool av = a.mask[i] != 0;
-        bool bv = b.mask[i] != 0;
-        if (av && bv) {
-            ++intersection;
-        }
-        if (av || bv) {
-            ++union_count;
+    for (int y = region.y; y < region.y + region.height; ++y) {
+        for (int x = region.x; x < region.x + region.width; ++x) {
+            bool av = mask_value_at_source(a, x, y) != 0;
+            bool bv = mask_value_at_source(b, x, y) != 0;
+            if (av && bv) {
+                ++intersection;
+            }
+            if (av || bv) {
+                ++union_count;
+            }
         }
     }
     return union_count > 0 ? static_cast<float>(intersection) / static_cast<float>(union_count) : 1.0f;
@@ -375,18 +444,23 @@ float mask_iou(const Segmentation& a, const Segmentation& b)
 
 float mask_diff_ratio(const Segmentation& a, const Segmentation& b)
 {
-    if (a.mask_width != b.mask_width || a.mask_height != b.mask_height ||
-        a.mask.empty() || b.mask.empty()) {
+    if (a.mask.empty() || b.mask.empty()) {
         return 1.0f;
     }
 
+    int canvas_width = 0;
+    int canvas_height = 0;
+    cv::Rect region;
+    comparison_canvas(a, b, canvas_width, canvas_height, region);
     int diff = 0;
-    size_t pixels = a.mask.size();
-    for (size_t i = 0; i < pixels; ++i) {
-        if ((a.mask[i] != 0) != (b.mask[i] != 0)) {
-            ++diff;
+    for (int y = region.y; y < region.y + region.height; ++y) {
+        for (int x = region.x; x < region.x + region.width; ++x) {
+            if ((mask_value_at_source(a, x, y) != 0) != (mask_value_at_source(b, x, y) != 0)) {
+                ++diff;
+            }
         }
     }
+    int pixels = region.width * region.height;
     return pixels > 0 ? static_cast<float>(diff) / static_cast<float>(pixels) : 0.0f;
 }
 

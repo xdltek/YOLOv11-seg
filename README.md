@@ -191,6 +191,7 @@ Benchmark logs are saved under `build/logs/`.
 - `cmake --build build -j$(nproc)`: passed after adding standalone postprocess accuracy-check mode
 - `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed on RPP with synthetic tensors; `min_box_iou=1.000000`, `min_mask_iou=0.999110`, `max_mask_diff_ratio=0.000105`
 - `scripts/build_postprocess_test.sh --perf` and `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed; code trace `/home/azurengine/github/trace/yolov11_seg_postprocess_test_37406.json`, driver trace `/tmp/rpp/rpp_trace_37406.json`; main postprocess hotspots were source resize/crop and D2H/source copy
+- `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed after ROI/local mask optimization; `profile_total_ms=130.556`, `mask_decode_ms=85.521`, `mask_source_resize_crop_ms=4.830`, `mask_source_copy_ms=38.778`, `min_mask_iou=0.999110`
 - `scripts/run.sh --demo rgb --loop 1`: blocked by environment, `/usr/local/rpp/bin/rpp_server` reports `no RPP device found`
 
 ## Known Limitations
@@ -198,5 +199,5 @@ Benchmark logs are saved under `build/logs/`.
 - Runtime execution requires an available RPP device and working `rpp_server`.
 - Output split, selected coefficient gather, selected mask prototype combination, low-resolution mask threshold, and source-size raw-mask resize/crop run on RPP.
 - NMS remains CPU-based in this version; the split det head is prepared for the YOLOv8/YOLOv11 RT_NMS path.
-- Source-size mask resize/crop is RPP fixed-point bilinear and letterbox-aware; target-board parity validation is still needed.
+- Mask resize/crop now runs as an RPP fixed-point bilinear bbox-local kernel and returns `box.width x box.height` local masks; visualization supports both full-source and bbox-local masks.
 - The output layout is validated for the local `yolo11s-seg.onnx` model shape. Other exports may need layout handling updates.
