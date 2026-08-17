@@ -12,6 +12,11 @@ source_width="640"
 source_height="640"
 detection_bin=""
 prototype_bin=""
+accuracy_check="0"
+min_box_iou=""
+max_box_diff=""
+min_mask_iou=""
+max_mask_diff_ratio=""
 
 show_help() {
     cat <<'EOF'
@@ -25,6 +30,12 @@ Options:
       --source-height N     Source image height for letterbox restore. Default: 640
       --detection-bin PATH  Optional f32 detection output, shape [1,116,8400]
       --prototype-bin PATH  Optional f32 prototype output, shape [1,32,160,160]
+      --accuracy-check      Compare RPP output with CPU OpenCV reference
+      --min-box-iou F       Accuracy mode minimum box IoU. Binary default: 0.98
+      --max-box-diff F      Accuracy mode maximum box coordinate diff in pixels. Binary default: 1.0
+      --min-mask-iou F      Accuracy mode minimum mask IoU. Binary default: 0.90
+      --max-mask-diff-ratio F
+                            Accuracy mode maximum mask pixel diff ratio. Binary default: 0.15
   -h, --help                Show this help message.
 
 Without --detection-bin/--prototype-bin, the demo generates synthetic YOLOv11-SEG outputs.
@@ -95,6 +106,26 @@ while [[ $# -gt 0 ]]; do
             prototype_bin="$(resolve_repo_path "$2")"
             shift 2
             ;;
+        --accuracy-check)
+            accuracy_check="1"
+            shift
+            ;;
+        --min-box-iou)
+            min_box_iou="$2"
+            shift 2
+            ;;
+        --max-box-diff)
+            max_box_diff="$2"
+            shift 2
+            ;;
+        --min-mask-iou)
+            min_mask_iou="$2"
+            shift 2
+            ;;
+        --max-mask-diff-ratio)
+            max_mask_diff_ratio="$2"
+            shift 2
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -121,6 +152,21 @@ if [[ -n "${detection_bin}" || -n "${prototype_bin}" ]]; then
         exit 1
     fi
     args+=(--detection-bin "${detection_bin}" --prototype-bin "${prototype_bin}")
+fi
+if [[ "${accuracy_check}" == "1" ]]; then
+    args+=(--accuracy-check)
+fi
+if [[ -n "${min_box_iou}" ]]; then
+    args+=(--min-box-iou "${min_box_iou}")
+fi
+if [[ -n "${max_box_diff}" ]]; then
+    args+=(--max-box-diff "${max_box_diff}")
+fi
+if [[ -n "${min_mask_iou}" ]]; then
+    args+=(--min-mask-iou "${min_mask_iou}")
+fi
+if [[ -n "${max_mask_diff_ratio}" ]]; then
+    args+=(--max-mask-diff-ratio "${max_mask_diff_ratio}")
 fi
 
 ensure_rpp_server

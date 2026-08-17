@@ -196,6 +196,7 @@ target_include_directories(yolov11_seg_postprocess_test PRIVATE
     ${ThirdPartyLib_Include}
     ${RPP_POSTPROCESS_INCLUDE_DIR}
     ${YOLOV11_INCLUDE_DIR}
+    ${YOLO_PERF_INCLUDE_DIR}
     ${RppRT_INCLUDE_DIRS}
 )
 target_link_libraries(yolov11_seg_postprocess_test PRIVATE rpp_yolov11_seg_postprocess)

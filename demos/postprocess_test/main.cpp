@@ -3,12 +3,15 @@
  * @brief Standalone YOLOv11-SEG postprocess validation and timing demo.
  */
 #include "argparse/argparse.hpp"
+#include "perf_trace_session.h"
 #include "rpp_yolov11_seg_postprocessor.h"
 
+#include <opencv2/imgproc.hpp>
 #include <rpp_runtime.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
@@ -29,6 +32,42 @@ constexpr int kAnchors = 8400;
 constexpr int kDetectionChannels = 4 + kClassCount + kMaskCoeffCount;
 constexpr int kPrototypeHeight = 160;
 constexpr int kPrototypeWidth = 160;
+#ifdef YOLO_ENABLE_RPP_PERF
+constexpr bool kPerfTraceEnabled = true;
+#else
+constexpr bool kPerfTraceEnabled = false;
+#endif
+constexpr const char* kPerfTraceDir = "../trace";
+
+struct ReferenceCandidate
+{
+    int anchor = -1;
+    int class_id = -1;
+    float score = 0.0f;
+    cv::Rect box;
+};
+
+struct AccuracyThresholds
+{
+    float min_box_iou = 0.98f;
+    float max_box_diff_px = 1.0f;
+    float min_mask_iou = 0.90f;
+    float max_mask_diff_ratio = 0.15f;
+};
+
+struct AccuracySummary
+{
+    bool passed = true;
+    int output_segments = 0;
+    int reference_segments = 0;
+    int matched_segments = 0;
+    int extra_output_segments = 0;
+    int missing_reference_segments = 0;
+    float min_box_iou = 1.0f;
+    float max_box_diff_px = 0.0f;
+    float min_mask_iou = 1.0f;
+    float max_mask_diff_ratio = 0.0f;
+};
 
 bool check_rt(rtError_t status, const char* what)
 {
@@ -71,6 +110,344 @@ void set_detection_value(std::vector<float>& detection, int channel, int anchor,
 {
     detection[static_cast<size_t>(channel) * static_cast<size_t>(kAnchors) +
               static_cast<size_t>(anchor)] = value;
+}
+
+float detection_value_at(const std::vector<float>& detection, int channel, int anchor)
+{
+    return detection[static_cast<size_t>(channel) * static_cast<size_t>(kAnchors) +
+                     static_cast<size_t>(anchor)];
+}
+
+float sigmoid_ref(float value)
+{
+    if (value >= 0.0f) {
+        float z = std::exp(-value);
+        return 1.0f / (1.0f + z);
+    }
+    float z = std::exp(value);
+    return z / (1.0f + z);
+}
+
+cv::Rect clip_rect_to_image_ref(float left, float top, float right, float bottom, int width, int height)
+{
+    left = std::max(0.0f, std::min(left, static_cast<float>(width - 1)));
+    top = std::max(0.0f, std::min(top, static_cast<float>(height - 1)));
+    right = std::max(0.0f, std::min(right, static_cast<float>(width - 1)));
+    bottom = std::max(0.0f, std::min(bottom, static_cast<float>(height - 1)));
+
+    int x0 = static_cast<int>(std::floor(left));
+    int y0 = static_cast<int>(std::floor(top));
+    int x1 = static_cast<int>(std::ceil(right));
+    int y1 = static_cast<int>(std::ceil(bottom));
+    return cv::Rect(x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0));
+}
+
+float intersection_over_union_ref(const cv::Rect& a, const cv::Rect& b)
+{
+    int x1 = std::max(a.x, b.x);
+    int y1 = std::max(a.y, b.y);
+    int x2 = std::min(a.x + a.width, b.x + b.width);
+    int y2 = std::min(a.y + a.height, b.y + b.height);
+    float intersection = 0.0f;
+    if (x2 > x1 && y2 > y1) {
+        intersection = static_cast<float>((x2 - x1) * (y2 - y1));
+    }
+    float union_area = static_cast<float>(a.area() + b.area()) - intersection;
+    return union_area > 0.0f ? intersection / union_area : 0.0f;
+}
+
+float max_box_coordinate_diff(const cv::Rect& a, const cv::Rect& b)
+{
+    float dx0 = static_cast<float>(std::abs(a.x - b.x));
+    float dy0 = static_cast<float>(std::abs(a.y - b.y));
+    float dx1 = static_cast<float>(std::abs((a.x + a.width) - (b.x + b.width)));
+    float dy1 = static_cast<float>(std::abs((a.y + a.height) - (b.y + b.height)));
+    return std::max(std::max(dx0, dy0), std::max(dx1, dy1));
+}
+
+void decode_reference_candidates(const std::vector<float>& detection,
+                                 const YoloV11SegConfig& config,
+                                 const LetterboxInfo& letterbox,
+                                 std::vector<ReferenceCandidate>& candidates)
+{
+    candidates.clear();
+    for (int anchor = 0; anchor < kAnchors; ++anchor) {
+        int best_class = -1;
+        float best_score = 0.0f;
+        for (int class_id = 0; class_id < config.class_count; ++class_id) {
+            float score = detection_value_at(detection, 4 + class_id, anchor);
+            if (score > best_score) {
+                best_score = score;
+                best_class = class_id;
+            }
+        }
+        if (best_class < 0 || best_score < config.score_threshold) {
+            continue;
+        }
+
+        float cx = detection_value_at(detection, 0, anchor);
+        float cy = detection_value_at(detection, 1, anchor);
+        float width = detection_value_at(detection, 2, anchor);
+        float height = detection_value_at(detection, 3, anchor);
+        if (width <= 0.0f || height <= 0.0f) {
+            continue;
+        }
+
+        float left = ((cx - 0.5f * width) - letterbox.pad_x) / letterbox.scale;
+        float top = ((cy - 0.5f * height) - letterbox.pad_y) / letterbox.scale;
+        float right = ((cx + 0.5f * width) - letterbox.pad_x) / letterbox.scale;
+        float bottom = ((cy + 0.5f * height) - letterbox.pad_y) / letterbox.scale;
+        cv::Rect box = clip_rect_to_image_ref(left,
+                                              top,
+                                              right,
+                                              bottom,
+                                              letterbox.source_width,
+                                              letterbox.source_height);
+        if (box.empty()) {
+            continue;
+        }
+
+        ReferenceCandidate candidate;
+        candidate.anchor = anchor;
+        candidate.class_id = best_class;
+        candidate.score = best_score;
+        candidate.box = box;
+        candidates.push_back(candidate);
+    }
+}
+
+void run_reference_nms(const std::vector<ReferenceCandidate>& candidates,
+                       const YoloV11SegConfig& config,
+                       std::vector<int>& keep)
+{
+    keep.clear();
+    std::vector<int> order(candidates.size());
+    for (int i = 0; i < static_cast<int>(order.size()); ++i) {
+        order[static_cast<size_t>(i)] = i;
+    }
+    std::sort(order.begin(), order.end(), [&candidates](int a, int b) {
+        return candidates[static_cast<size_t>(a)].score > candidates[static_cast<size_t>(b)].score;
+    });
+
+    while (!order.empty() && static_cast<int>(keep.size()) < config.max_segments) {
+        int best = order.front();
+        keep.push_back(best);
+
+        std::vector<int> next;
+        next.reserve(order.size());
+        for (size_t i = 1; i < order.size(); ++i) {
+            int idx = order[i];
+            if (!config.agnostic &&
+                candidates[static_cast<size_t>(idx)].class_id != candidates[static_cast<size_t>(best)].class_id) {
+                next.push_back(idx);
+                continue;
+            }
+            if (intersection_over_union_ref(candidates[static_cast<size_t>(best)].box,
+                                            candidates[static_cast<size_t>(idx)].box) <= config.nms_threshold) {
+                next.push_back(idx);
+            }
+        }
+        order.swap(next);
+    }
+}
+
+void build_reference_mask(const std::vector<float>& detection,
+                          const std::vector<float>& prototype,
+                          const YoloV11SegConfig& config,
+                          const LetterboxInfo& letterbox,
+                          const ReferenceCandidate& candidate,
+                          Segmentation& segment)
+{
+    cv::Mat proto_prob(kPrototypeHeight, kPrototypeWidth, CV_32FC1);
+    for (int y = 0; y < kPrototypeHeight; ++y) {
+        float* row = proto_prob.ptr<float>(y);
+        for (int x = 0; x < kPrototypeWidth; ++x) {
+            float value = 0.0f;
+            for (int coeff = 0; coeff < config.mask_coeff_count; ++coeff) {
+                float coefficient = detection_value_at(detection, 4 + config.class_count + coeff, candidate.anchor);
+                size_t prototype_offset = (static_cast<size_t>(coeff) * kPrototypeHeight +
+                                           static_cast<size_t>(y)) *
+                                              kPrototypeWidth +
+                                          static_cast<size_t>(x);
+                value += coefficient * prototype[prototype_offset];
+            }
+            row[x] = sigmoid_ref(value);
+        }
+    }
+
+    cv::Mat model_mask;
+    cv::resize(proto_prob,
+               model_mask,
+               cv::Size(letterbox.model_width, letterbox.model_height),
+               0.0,
+               0.0,
+               cv::INTER_LINEAR);
+
+    int valid_x = std::max(0, static_cast<int>(std::round(letterbox.pad_x)));
+    int valid_y = std::max(0, static_cast<int>(std::round(letterbox.pad_y)));
+    int valid_w = std::min(letterbox.resized_width, letterbox.model_width - valid_x);
+    int valid_h = std::min(letterbox.resized_height, letterbox.model_height - valid_y);
+    if (valid_w <= 0 || valid_h <= 0) {
+        return;
+    }
+
+    cv::Rect valid_region(valid_x, valid_y, valid_w, valid_h);
+    cv::Mat unpadded = model_mask(valid_region);
+    cv::Mat source_prob;
+    cv::resize(unpadded,
+               source_prob,
+               cv::Size(letterbox.source_width, letterbox.source_height),
+               0.0,
+               0.0,
+               cv::INTER_LINEAR);
+
+    cv::Mat binary;
+    cv::threshold(source_prob, binary, config.mask_threshold, 255.0, cv::THRESH_BINARY);
+    binary.convertTo(binary, CV_8UC1);
+
+    cv::Mat cropped = cv::Mat::zeros(binary.size(), CV_8UC1);
+    cv::Rect clipped_box = candidate.box & cv::Rect(0, 0, binary.cols, binary.rows);
+    if (clipped_box.empty()) {
+        return;
+    }
+    binary(clipped_box).copyTo(cropped(clipped_box));
+    if (cv::countNonZero(cropped) == 0) {
+        return;
+    }
+
+    segment.class_id = candidate.class_id;
+    segment.confidence = candidate.score;
+    segment.box = candidate.box;
+    segment.mask_width = cropped.cols;
+    segment.mask_height = cropped.rows;
+    segment.mask.assign(cropped.datastart, cropped.dataend);
+}
+
+void build_reference_segments(const std::vector<float>& detection,
+                              const std::vector<float>& prototype,
+                              const YoloV11SegConfig& config,
+                              const LetterboxInfo& letterbox,
+                              std::vector<Segmentation>& reference)
+{
+    std::vector<ReferenceCandidate> candidates;
+    std::vector<int> keep;
+    decode_reference_candidates(detection, config, letterbox, candidates);
+    run_reference_nms(candidates, config, keep);
+
+    reference.clear();
+    reference.reserve(keep.size());
+    for (int kept_index : keep) {
+        Segmentation segment;
+        build_reference_mask(detection,
+                             prototype,
+                             config,
+                             letterbox,
+                             candidates[static_cast<size_t>(kept_index)],
+                             segment);
+        if (!segment.mask.empty()) {
+            reference.push_back(std::move(segment));
+        }
+    }
+}
+
+float mask_iou(const Segmentation& a, const Segmentation& b)
+{
+    if (a.mask_width != b.mask_width || a.mask_height != b.mask_height ||
+        a.mask.empty() || b.mask.empty()) {
+        return 0.0f;
+    }
+
+    int intersection = 0;
+    int union_count = 0;
+    size_t pixels = a.mask.size();
+    for (size_t i = 0; i < pixels; ++i) {
+        bool av = a.mask[i] != 0;
+        bool bv = b.mask[i] != 0;
+        if (av && bv) {
+            ++intersection;
+        }
+        if (av || bv) {
+            ++union_count;
+        }
+    }
+    return union_count > 0 ? static_cast<float>(intersection) / static_cast<float>(union_count) : 1.0f;
+}
+
+float mask_diff_ratio(const Segmentation& a, const Segmentation& b)
+{
+    if (a.mask_width != b.mask_width || a.mask_height != b.mask_height ||
+        a.mask.empty() || b.mask.empty()) {
+        return 1.0f;
+    }
+
+    int diff = 0;
+    size_t pixels = a.mask.size();
+    for (size_t i = 0; i < pixels; ++i) {
+        if ((a.mask[i] != 0) != (b.mask[i] != 0)) {
+            ++diff;
+        }
+    }
+    return pixels > 0 ? static_cast<float>(diff) / static_cast<float>(pixels) : 0.0f;
+}
+
+AccuracySummary compare_accuracy(const std::vector<Segmentation>& output,
+                                 const std::vector<Segmentation>& reference,
+                                 const AccuracyThresholds& thresholds)
+{
+    AccuracySummary summary;
+    summary.output_segments = static_cast<int>(output.size());
+    summary.reference_segments = static_cast<int>(reference.size());
+    summary.matched_segments = std::min(summary.output_segments, summary.reference_segments);
+    summary.extra_output_segments = std::max(0, summary.output_segments - summary.reference_segments);
+    summary.missing_reference_segments = std::max(0, summary.reference_segments - summary.output_segments);
+
+    if (summary.matched_segments == 0) {
+        summary.min_box_iou = reference.empty() && output.empty() ? 1.0f : 0.0f;
+        summary.min_mask_iou = reference.empty() && output.empty() ? 1.0f : 0.0f;
+    }
+
+    for (int i = 0; i < summary.matched_segments; ++i) {
+        const Segmentation& out = output[static_cast<size_t>(i)];
+        const Segmentation& ref = reference[static_cast<size_t>(i)];
+        float box_iou = intersection_over_union_ref(out.box, ref.box);
+        float box_diff = max_box_coordinate_diff(out.box, ref.box);
+        float current_mask_iou = mask_iou(out, ref);
+        float current_mask_diff_ratio = mask_diff_ratio(out, ref);
+
+        summary.min_box_iou = std::min(summary.min_box_iou, box_iou);
+        summary.max_box_diff_px = std::max(summary.max_box_diff_px, box_diff);
+        summary.min_mask_iou = std::min(summary.min_mask_iou, current_mask_iou);
+        summary.max_mask_diff_ratio = std::max(summary.max_mask_diff_ratio, current_mask_diff_ratio);
+
+        bool metadata_match = out.class_id == ref.class_id &&
+                              std::fabs(out.confidence - ref.confidence) <= 1.0e-5f;
+        bool match_passed = metadata_match &&
+                            box_iou >= thresholds.min_box_iou &&
+                            box_diff <= thresholds.max_box_diff_px &&
+                            current_mask_iou >= thresholds.min_mask_iou &&
+                            current_mask_diff_ratio <= thresholds.max_mask_diff_ratio;
+        summary.passed = summary.passed && match_passed;
+
+        std::cout << std::fixed << std::setprecision(6)
+                  << "  segment[" << i << "]: "
+                  << "class(out/ref)=" << out.class_id << "/" << ref.class_id
+                  << ", score(out/ref)=" << out.confidence << "/" << ref.confidence
+                  << ", box_iou=" << box_iou
+                  << ", max_box_diff_px=" << box_diff
+                  << ", mask_iou=" << current_mask_iou
+                  << ", mask_diff_ratio=" << current_mask_diff_ratio << "\n";
+    }
+
+    if (summary.extra_output_segments != 0 || summary.missing_reference_segments != 0) {
+        summary.passed = false;
+    }
+    if (summary.min_box_iou < thresholds.min_box_iou ||
+        summary.max_box_diff_px > thresholds.max_box_diff_px ||
+        summary.min_mask_iou < thresholds.min_mask_iou ||
+        summary.max_mask_diff_ratio > thresholds.max_mask_diff_ratio) {
+        summary.passed = false;
+    }
+    return summary;
 }
 
 void generate_synthetic_outputs(std::vector<float>& detection, std::vector<float>& prototype)
@@ -161,11 +538,23 @@ void print_profile(const YoloV11SegPostprocessProfile& profile,
     std::cout << std::fixed << std::setprecision(3)
               << "Postprocess timing:\n"
               << "  split_ms: " << profile.split_ms << " ms\n"
+              << "    split_d2s_ms: " << profile.split_d2s_ms << " ms\n"
+              << "    split_kernel_ms: " << profile.split_kernel_ms << " ms\n"
+              << "    split_s2d_ms: " << profile.split_s2d_ms << " ms\n"
+              << "    split_d2h_ms: " << profile.split_d2h_ms << " ms\n"
               << "  output_d2h_ms: " << profile.device_to_host_ms << " ms\n"
               << "  output_d2h_bytes: " << profile.device_to_host_bytes
               << " bytes (" << bytes_to_kib(profile.device_to_host_bytes) << " KiB)\n"
               << "  decode_nms_ms: " << profile.decode_nms_ms << " ms\n"
               << "  mask_decode_ms: " << profile.mask_decode_ms << " ms\n"
+              << "    mask_setup_copy_ms: " << profile.mask_setup_copy_ms << " ms\n"
+              << "    mask_coeff_gather_ms: " << profile.mask_coeff_gather_ms << " ms\n"
+              << "    mask_proto_combine_ms: " << profile.mask_proto_combine_ms << " ms\n"
+              << "    mask_lowres_threshold_ms: " << profile.mask_lowres_threshold_ms << " ms\n"
+              << "    mask_box_copy_ms: " << profile.mask_box_copy_ms << " ms\n"
+              << "    mask_source_resize_crop_ms: " << profile.mask_source_resize_crop_ms << " ms\n"
+              << "    mask_source_copy_ms: " << profile.mask_source_copy_ms << " ms\n"
+              << "    mask_build_cpu_ms: " << profile.mask_build_cpu_ms << " ms\n"
               << "  profile_total_ms: " << profile.total_ms << " ms\n"
               << "  outer_call_ms: " << outer_ms << " ms\n"
               << "  output_segments: " << segment_count << std::endl;
@@ -207,6 +596,26 @@ int main(int argc, char** argv)
     program.add_argument("--max-segments")
             .default_value(100)
             .scan<'i', int>();
+    program.add_argument("--accuracy-check")
+            .help("compare RPP postprocess output against CPU reference and return non-zero on mismatch.")
+            .default_value(false)
+            .implicit_value(true);
+    program.add_argument("--min-box-iou")
+            .default_value(0.98f)
+            .help("minimum accepted box IoU in --accuracy-check mode.")
+            .scan<'g', float>();
+    program.add_argument("--max-box-diff")
+            .default_value(1.0f)
+            .help("maximum accepted restored box coordinate difference in pixels.")
+            .scan<'g', float>();
+    program.add_argument("--min-mask-iou")
+            .default_value(0.90f)
+            .help("minimum accepted source-size binary mask IoU in --accuracy-check mode.")
+            .scan<'g', float>();
+    program.add_argument("--max-mask-diff-ratio")
+            .default_value(0.15f)
+            .help("maximum accepted binary mask pixel mismatch ratio.")
+            .scan<'g', float>();
 
     try {
         program.parse_args(argc, argv);
@@ -220,8 +629,21 @@ int main(int argc, char** argv)
     int warmup = program.get<int>("--warmup");
     int source_width = program.get<int>("--source-width");
     int source_height = program.get<int>("--source-height");
+    bool accuracy_check = program.get<bool>("--accuracy-check");
     if (loop <= 0 || warmup < 0 || source_width <= 0 || source_height <= 0) {
         std::cerr << "Invalid loop/warmup/source dimensions." << std::endl;
+        return EXIT_FAILURE;
+    }
+    AccuracyThresholds accuracy_thresholds;
+    accuracy_thresholds.min_box_iou = program.get<float>("--min-box-iou");
+    accuracy_thresholds.max_box_diff_px = program.get<float>("--max-box-diff");
+    accuracy_thresholds.min_mask_iou = program.get<float>("--min-mask-iou");
+    accuracy_thresholds.max_mask_diff_ratio = program.get<float>("--max-mask-diff-ratio");
+    if (accuracy_thresholds.min_box_iou < 0.0f || accuracy_thresholds.min_box_iou > 1.0f ||
+        accuracy_thresholds.max_box_diff_px < 0.0f ||
+        accuracy_thresholds.min_mask_iou < 0.0f || accuracy_thresholds.min_mask_iou > 1.0f ||
+        accuracy_thresholds.max_mask_diff_ratio < 0.0f || accuracy_thresholds.max_mask_diff_ratio > 1.0f) {
+        std::cerr << "Invalid accuracy thresholds." << std::endl;
         return EXIT_FAILURE;
     }
 
@@ -250,6 +672,9 @@ int main(int argc, char** argv)
     else {
         generate_synthetic_outputs(detection, prototype);
     }
+
+    PerfTraceSession trace_session("yolov11_seg_postprocess_test", kPerfTraceEnabled, kPerfTraceDir);
+    trace_session.enableDriverTrace(0);
 
     void* detection_device = nullptr;
     void* prototype_device = nullptr;
@@ -302,8 +727,20 @@ int main(int argc, char** argv)
         total_profile.device_to_host_ms += profile.device_to_host_ms;
         total_profile.device_to_host_bytes += profile.device_to_host_bytes;
         total_profile.split_ms += profile.split_ms;
+        total_profile.split_d2s_ms += profile.split_d2s_ms;
+        total_profile.split_kernel_ms += profile.split_kernel_ms;
+        total_profile.split_s2d_ms += profile.split_s2d_ms;
+        total_profile.split_d2h_ms += profile.split_d2h_ms;
         total_profile.decode_nms_ms += profile.decode_nms_ms;
         total_profile.mask_decode_ms += profile.mask_decode_ms;
+        total_profile.mask_setup_copy_ms += profile.mask_setup_copy_ms;
+        total_profile.mask_coeff_gather_ms += profile.mask_coeff_gather_ms;
+        total_profile.mask_proto_combine_ms += profile.mask_proto_combine_ms;
+        total_profile.mask_lowres_threshold_ms += profile.mask_lowres_threshold_ms;
+        total_profile.mask_box_copy_ms += profile.mask_box_copy_ms;
+        total_profile.mask_source_resize_crop_ms += profile.mask_source_resize_crop_ms;
+        total_profile.mask_source_copy_ms += profile.mask_source_copy_ms;
+        total_profile.mask_build_cpu_ms += profile.mask_build_cpu_ms;
         total_profile.total_ms += profile.total_ms;
     }
 
@@ -312,8 +749,20 @@ int main(int argc, char** argv)
     average_profile.device_to_host_ms = total_profile.device_to_host_ms * inv_loop;
     average_profile.device_to_host_bytes = total_profile.device_to_host_bytes / static_cast<size_t>(loop);
     average_profile.split_ms = total_profile.split_ms * inv_loop;
+    average_profile.split_d2s_ms = total_profile.split_d2s_ms * inv_loop;
+    average_profile.split_kernel_ms = total_profile.split_kernel_ms * inv_loop;
+    average_profile.split_s2d_ms = total_profile.split_s2d_ms * inv_loop;
+    average_profile.split_d2h_ms = total_profile.split_d2h_ms * inv_loop;
     average_profile.decode_nms_ms = total_profile.decode_nms_ms * inv_loop;
     average_profile.mask_decode_ms = total_profile.mask_decode_ms * inv_loop;
+    average_profile.mask_setup_copy_ms = total_profile.mask_setup_copy_ms * inv_loop;
+    average_profile.mask_coeff_gather_ms = total_profile.mask_coeff_gather_ms * inv_loop;
+    average_profile.mask_proto_combine_ms = total_profile.mask_proto_combine_ms * inv_loop;
+    average_profile.mask_lowres_threshold_ms = total_profile.mask_lowres_threshold_ms * inv_loop;
+    average_profile.mask_box_copy_ms = total_profile.mask_box_copy_ms * inv_loop;
+    average_profile.mask_source_resize_crop_ms = total_profile.mask_source_resize_crop_ms * inv_loop;
+    average_profile.mask_source_copy_ms = total_profile.mask_source_copy_ms * inv_loop;
+    average_profile.mask_build_cpu_ms = total_profile.mask_build_cpu_ms * inv_loop;
     average_profile.total_ms = total_profile.total_ms * inv_loop;
 
     std::cout << "YOLOv11-SEG postprocess standalone test\n"
@@ -321,10 +770,45 @@ int main(int argc, char** argv)
               << "  prototype_elements: " << config.prototype_elements << "\n"
               << "  source_size: " << source_width << "x" << source_height << "\n"
               << "  warmup: " << warmup << "\n"
-              << "  loop: " << loop << "\n";
+              << "  loop: " << loop << "\n"
+              << "  accuracy_check: " << (accuracy_check ? "enabled" : "disabled") << "\n";
     print_profile(average_profile, total_outer_ms * inv_loop, static_cast<int>(segments.size()));
+
+    bool accuracy_passed = true;
+    if (accuracy_check) {
+        auto reference_start = Clock::now();
+        std::vector<Segmentation> reference_segments;
+        build_reference_segments(detection, prototype, config, letterbox, reference_segments);
+        double reference_ms = elapsed_ms(reference_start, Clock::now());
+
+        std::cout << std::fixed << std::setprecision(3)
+                  << "Accuracy thresholds:\n"
+                  << "  min_box_iou: " << accuracy_thresholds.min_box_iou << "\n"
+                  << "  max_box_diff_px: " << accuracy_thresholds.max_box_diff_px << "\n"
+                  << "  min_mask_iou: " << accuracy_thresholds.min_mask_iou << "\n"
+                  << "  max_mask_diff_ratio: " << accuracy_thresholds.max_mask_diff_ratio << "\n"
+                  << "CPU reference:\n"
+                  << "  reference_ms: " << reference_ms << " ms\n"
+                  << "  reference_segments: " << reference_segments.size() << "\n"
+                  << "Accuracy detail:\n";
+
+        AccuracySummary summary = compare_accuracy(segments, reference_segments, accuracy_thresholds);
+        accuracy_passed = summary.passed;
+        std::cout << std::fixed << std::setprecision(6)
+                  << "Accuracy summary:\n"
+                  << "  output_segments: " << summary.output_segments << "\n"
+                  << "  reference_segments: " << summary.reference_segments << "\n"
+                  << "  matched_segments: " << summary.matched_segments << "\n"
+                  << "  extra_output_segments: " << summary.extra_output_segments << "\n"
+                  << "  missing_reference_segments: " << summary.missing_reference_segments << "\n"
+                  << "  min_box_iou: " << summary.min_box_iou << "\n"
+                  << "  max_box_diff_px: " << summary.max_box_diff_px << "\n"
+                  << "  min_mask_iou: " << summary.min_mask_iou << "\n"
+                  << "  max_mask_diff_ratio: " << summary.max_mask_diff_ratio << "\n"
+                  << "  result: " << (summary.passed ? "PASS" : "FAIL") << std::endl;
+    }
 
     rtFree(detection_device);
     rtFree(prototype_device);
-    return EXIT_SUCCESS;
+    return accuracy_passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -54,4 +54,23 @@ void launch_yolov11_seg_sigmoid_threshold_lowres(rtStream_t stream,
                                                  int mask_width,
                                                  float logit_threshold);
 
+/**
+ * @brief Launch source-size resize and box crop from one low-resolution binary mask.
+ */
+void launch_yolov11_seg_resize_raw_to_source_crop(rtStream_t stream,
+                                                  const float* raw_mask,
+                                                     const int* box_xywh,
+                                                     float* source_mask,
+                                                     int source_height,
+                                                     int source_width,
+                                                     int model_height,
+                                                     int model_width,
+                                                     int mask_height,
+                                                     int mask_width,
+                                                     int resized_height,
+                                                     int resized_width,
+                                                     int pad_top,
+                                                     int pad_left,
+                                                     float logit_threshold);
+
 #endif // XDLTEK_SAMPLES_RPP_POSTPROCESS_KERNELS_CUH

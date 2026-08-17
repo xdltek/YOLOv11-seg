@@ -21,8 +21,20 @@ struct YoloV11SegPostprocessProfile
     double device_to_host_ms = 0.0;
     size_t device_to_host_bytes = 0;
     double split_ms = 0.0;
+    double split_d2s_ms = 0.0;
+    double split_kernel_ms = 0.0;
+    double split_s2d_ms = 0.0;
+    double split_d2h_ms = 0.0;
     double decode_nms_ms = 0.0;
     double mask_decode_ms = 0.0;
+    double mask_setup_copy_ms = 0.0;
+    double mask_coeff_gather_ms = 0.0;
+    double mask_proto_combine_ms = 0.0;
+    double mask_lowres_threshold_ms = 0.0;
+    double mask_box_copy_ms = 0.0;
+    double mask_source_resize_crop_ms = 0.0;
+    double mask_source_copy_ms = 0.0;
+    double mask_build_cpu_ms = 0.0;
     double total_ms = 0.0;
 };
 
@@ -97,6 +109,10 @@ private:
                                    const LetterboxInfo& letterbox,
                                    const float* lowres_mask,
                                    Segmentation& segment) const;
+    void buildMaskFromSourceBinary(const float* source_mask,
+                                   int source_width,
+                                   int source_height,
+                                   Segmentation& segment) const;
     void buildMask(const Candidate& candidate, const LetterboxInfo& letterbox, Segmentation& segment) const;
     bool ensureDeviceBuffer(void** buffer, size_t* capacity, size_t required_bytes);
     bool ensureSramBuffer(void** buffer, size_t* capacity, size_t required_bytes);
@@ -116,7 +132,9 @@ private:
     std::vector<float> host_coefficients_;
     std::vector<float> host_raw_masks_;
     std::vector<int> host_selected_anchor_indices_;
+    std::vector<int> host_selected_box_;
     std::vector<float> host_lowres_masks_;
+    std::vector<float> host_source_mask_;
     void* prototype_sram_ = nullptr;
     void* coefficients_device_ = nullptr;
     void* coefficients_sram_ = nullptr;
@@ -126,6 +144,10 @@ private:
     void* selected_indices_sram_ = nullptr;
     void* binary_masks_device_ = nullptr;
     void* binary_masks_sram_ = nullptr;
+    void* selected_box_device_ = nullptr;
+    void* selected_box_sram_ = nullptr;
+    void* source_mask_device_ = nullptr;
+    void* source_mask_sram_ = nullptr;
     void* split_input_sram_ = nullptr;
     void* det_head_device_ = nullptr;
     void* det_head_sram_ = nullptr;
@@ -140,6 +162,10 @@ private:
     size_t selected_indices_sram_capacity_ = 0;
     size_t binary_masks_device_capacity_ = 0;
     size_t binary_masks_sram_capacity_ = 0;
+    size_t selected_box_device_capacity_ = 0;
+    size_t selected_box_sram_capacity_ = 0;
+    size_t source_mask_device_capacity_ = 0;
+    size_t source_mask_sram_capacity_ = 0;
     size_t split_input_sram_capacity_ = 0;
     size_t det_head_device_capacity_ = 0;
     size_t det_head_sram_capacity_ = 0;

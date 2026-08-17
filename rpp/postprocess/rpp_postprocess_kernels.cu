@@ -144,6 +144,7 @@ __global__ void yolov11_seg_combine_prototypes_kernel(const float* prototype,
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y;
+    int source_height = gridDim.y;
     int segment = blockIdx.z;
     int proto_pixel = y * prototype_width + x;
     float sum = 0.0f;
@@ -235,5 +236,109 @@ void launch_yolov11_seg_sigmoid_threshold_lowres(rtStream_t stream,
         binary_masks,
         mask_height,
         mask_width,
+        logit_threshold);
+}
+
+/**
+ * @brief Resize one raw low-resolution mask to source space and apply box crop.
+ */
+__global__ void yolov11_seg_resize_raw_to_source_crop_kernel(const float* raw_mask,
+                                                            const int* box_xywh,
+                                                            float* source_mask,
+                                                            int source_width,
+                                                            int model_height,
+                                                            int model_width,
+                                                            int mask_height,
+                                                            int mask_width,
+                                                            int resized_height,
+                                                            int resized_width,
+                                                            int pad_top,
+                                                            int pad_left,
+                                                            float logit_threshold)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y;
+    int source_height = gridDim.y;
+    short valid = static_cast<short>(x < source_width);
+    int safe_x = rpp_min(x, source_width - 1);
+
+    int box_x = box_xywh[0];
+    int box_y = box_xywh[1];
+    int box_w = box_xywh[2];
+    int box_h = box_xywh[3];
+    short inside_box = static_cast<short>((safe_x >= box_x) & (safe_x < box_x + box_w) &
+                                          (y >= box_y) & (y < box_y + box_h));
+
+    const int q = 8;
+    const int one = 1 << q;
+    int model_x_q = (safe_x * resized_width * one) / source_width + (pad_left << q);
+    int model_y_q = (y * resized_height * one) / source_height + (pad_top << q);
+    int mask_x_q = model_x_q * mask_width / model_width;
+    int mask_y_q = model_y_q * mask_height / model_height;
+
+    int x0 = rpp_min(rpp_max(mask_x_q >> q, 0), mask_width - 1);
+    int y0 = rpp_min(rpp_max(mask_y_q >> q, 0), mask_height - 1);
+    int x1 = rpp_min(x0 + 1, mask_width - 1);
+    int y1 = rpp_min(y0 + 1, mask_height - 1);
+    int wx_i = mask_x_q & (one - 1);
+    int wy_i = mask_y_q & (one - 1);
+    float wx = static_cast<float>(wx_i) * (1.0f / 256.0f);
+    float wy = static_cast<float>(wy_i) * (1.0f / 256.0f);
+
+    float v00 = raw_mask[y0 * mask_width + x0];
+    float v01 = raw_mask[y0 * mask_width + x1];
+    float v10 = raw_mask[y1 * mask_width + x0];
+    float v11 = raw_mask[y1 * mask_width + x1];
+    float top = v00 + (v01 - v00) * wx;
+    float bottom = v10 + (v11 - v10) * wx;
+    float mask_value = top + (bottom - top) * wy;
+    short foreground = static_cast<short>(mask_value > logit_threshold);
+    short keep = static_cast<short>(inside_box & foreground);
+    float output = rpp_select(0.0f, 255.0f, keep);
+    rpp_storemask(&source_mask[y * source_width + safe_x], output, valid);
+}
+
+/**
+ * @brief Launch source-size resize and box crop from one low-resolution binary mask.
+ */
+void launch_yolov11_seg_resize_raw_to_source_crop(rtStream_t stream,
+                                                  const float* raw_mask,
+                                                  const int* box_xywh,
+                                                  float* source_mask,
+                                                  int source_height,
+                                                  int source_width,
+                                                  int model_height,
+                                                  int model_width,
+                                                  int mask_height,
+                                                  int mask_width,
+                                                  int resized_height,
+                                                  int resized_width,
+                                                  int pad_top,
+                                                  int pad_left,
+                                                  float logit_threshold)
+{
+    dim3 threadsPerBlock = {0};
+    dim3 blocksPerGrid = {0};
+    threadsPerBlock.x = 256;
+    threadsPerBlock.y = 1;
+    threadsPerBlock.z = 1;
+    blocksPerGrid.x = (source_width + static_cast<int>(threadsPerBlock.x) - 1) /
+                      static_cast<int>(threadsPerBlock.x);
+    blocksPerGrid.y = source_height;
+    blocksPerGrid.z = 1;
+
+    yolov11_seg_resize_raw_to_source_crop_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(
+        raw_mask,
+        box_xywh,
+        source_mask,
+        source_width,
+        model_height,
+        model_width,
+        mask_height,
+        mask_width,
+        resized_height,
+        resized_width,
+        pad_top,
+        pad_left,
         logit_threshold);
 }

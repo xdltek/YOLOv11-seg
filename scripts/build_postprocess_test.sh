@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
+ENABLE_PERF="OFF"
 
 show_help() {
     cat <<'EOF'
@@ -11,6 +12,7 @@ Usage: scripts/build_postprocess_test.sh [options]
 
 Options:
   -b, --build-dir DIR   Build directory. Default: build
+      --perf            Enable YOLO_ENABLE_RPP_PERF.
   -h, --help            Show this help message.
 EOF
 }
@@ -30,6 +32,10 @@ while [[ $# -gt 0 ]]; do
             BUILD_DIR="$(resolve_repo_path "$2")"
             shift 2
             ;;
+        --perf)
+            ENABLE_PERF="ON"
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -42,5 +48,5 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -G "Unix Makefiles" -DYOLO_ENABLE_RPP_PERF=OFF
+cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -G "Unix Makefiles" -DYOLO_ENABLE_RPP_PERF="${ENABLE_PERF}"
 cmake --build "${BUILD_DIR}" --target yolov11_seg_postprocess_test -j"$(nproc)"

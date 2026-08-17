@@ -107,10 +107,10 @@ The current complete path is:
 7. run an RPP CUDA kernel to combine `coefficients x prototype` into selected low-resolution raw masks
 8. run an RPP CUDA kernel to threshold selected raw masks into low-resolution binary masks
 9. copy low-resolution binary masks back to host
-10. resize, box crop, and letterbox reverse mapping on CPU
+10. run an RPP CUDA kernel to resize the raw low-resolution mask to source-size dense mask, threshold it, and apply box crop
 11. render mask overlay and boxes
 
-The `det[84, anchors]` output is now isolated in a YOLOv11 det-compatible layout. The next TODO is to replace the CPU greedy NMS call with the YOLOv11 det RT_NMS path and return selected anchor indices directly from the device path. Source-size dense mask resize/crop remains the next SEG optimization item.
+The `det[84, anchors]` output is now isolated in a YOLOv11 det-compatible layout. The next TODO is to replace the CPU greedy NMS call with the YOLOv8/YOLOv11-style RT_NMS path and return selected anchor indices directly from the device path. The source-size mask kernel uses fixed-point letterbox-aware bilinear sampling from the raw mask before thresholding.
 
 ## Test
 
@@ -128,6 +128,13 @@ scripts/test_postprocess.sh
 scripts/run_postprocess_test.sh --loop 20 --warmup 1
 ```
 
+Enable code-side `rpp_perf` scopes for the standalone postprocess test:
+
+```bash
+scripts/build_postprocess_test.sh --perf
+scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check
+```
+
 The standalone test does not run preprocessing or inference. By default it generates synthetic YOLOv11-SEG `output0` and `output1` tensors, uploads them to RPP DDR, calls `YoloV11SegPostprocessor::run()`, and prints:
 
 - `output_d2h_ms`
@@ -139,13 +146,30 @@ The standalone test does not run preprocessing or inference. By default it gener
 - `outer_call_ms`
 - `output_segments`
 
+Postprocess precision validation:
+
+```bash
+scripts/run_postprocess_test.sh \
+  --loop 20 \
+  --warmup 1 \
+  --accuracy-check
+```
+
+In `--accuracy-check` mode, the test builds a CPU OpenCV reference from the same `output0/output1` tensors, then compares the RPP postprocess result against it. It prints per-segment `box_iou`, `max_box_diff_px`, `mask_iou`, and `mask_diff_ratio`, followed by a PASS/FAIL summary. Default thresholds are:
+
+- `--min-box-iou 0.98`
+- `--max-box-diff 1.0`
+- `--min-mask-iou 0.90`
+- `--max-mask-diff-ratio 0.15`
+
 To test real model output dumps:
 
 ```bash
 scripts/run_postprocess_test.sh \
   --detection-bin path/to/output0_f32.bin \
   --prototype-bin path/to/output1_f32.bin \
-  --loop 20
+  --loop 20 \
+  --accuracy-check
 ```
 
 ## Benchmark
@@ -164,13 +188,15 @@ Benchmark logs are saved under `build/logs/`.
 - `scripts/build_postprocess_test.sh`: passed
 - `scripts/test_postprocess.sh`: passed
 - `cmake --build build -j$(nproc)`: passed with `rpp_postprocess_kernels.cu`
+- `cmake --build build -j$(nproc)`: passed after adding standalone postprocess accuracy-check mode
+- `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed on RPP with synthetic tensors; `min_box_iou=1.000000`, `min_mask_iou=0.999110`, `max_mask_diff_ratio=0.000105`
+- `scripts/build_postprocess_test.sh --perf` and `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed; code trace `/home/azurengine/github/trace/yolov11_seg_postprocess_test_37406.json`, driver trace `/tmp/rpp/rpp_trace_37406.json`; main postprocess hotspots were source resize/crop and D2H/source copy
 - `scripts/run.sh --demo rgb --loop 1`: blocked by environment, `/usr/local/rpp/bin/rpp_server` reports `no RPP device found`
-- `scripts/run_postprocess_test.sh --loop 1 --warmup 0`: blocked by environment, `/usr/local/rpp/bin/rpp_server` reports `no RPP device found`
 
 ## Known Limitations
 
 - Runtime execution requires an available RPP device and working `rpp_server`.
-- Output split, selected coefficient gather, selected mask prototype combination, and low-resolution mask threshold run on RPP.
-- NMS remains CPU-based in this version; the split det head is prepared for the YOLOv11 det RT_NMS path.
-- Source-size mask resize/crop remains CPU-based.
+- Output split, selected coefficient gather, selected mask prototype combination, low-resolution mask threshold, and source-size raw-mask resize/crop run on RPP.
+- NMS remains CPU-based in this version; the split det head is prepared for the YOLOv8/YOLOv11 RT_NMS path.
+- Source-size mask resize/crop is RPP fixed-point bilinear and letterbox-aware; target-board parity validation is still needed.
 - The output layout is validated for the local `yolo11s-seg.onnx` model shape. Other exports may need layout handling updates.

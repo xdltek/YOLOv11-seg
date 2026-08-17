@@ -416,12 +416,13 @@ mask_prob[y, x] = sigmoid(mask_raw[y, x])
 | output0 DDR -> SRAM | `YoloV11SegPostprocessor::runRppSplitOutput` | RPP copy engine | 将模型 `output0` 保持到 RPP SRAM 后处理工作区 |
 | det/seg split | `yolov11_seg_split_det_coeff_kernel` / `launch_yolov11_seg_split_det_coeff` | RPP kernel | 将 `[116, anchors]` 拆成 `det[84, anchors]` 和 `seg_coeff[32, anchors]` |
 | det decode | `decodeCandidates` | CPU | 当前读取拆分后的 det staging buffer，后续替换为 YOLOv11 det postprocess |
-| NMS | `runNms` | CPU | TODO：接入 `/home/azurengine/github/YOLOv11` 中 YOLOv11 det RT_NMS 路径，并返回 selected anchor index |
+| NMS | `runNms` | CPU | TODO：参考 `/home/azurengine/github/YOLOv8/rpp/postprocess` 或 `/home/azurengine/github/YOLOv11` 的 `NMSPREPlugin + addNMS` 路径，并返回 selected anchor index |
 | selected anchor H2D/SRAM | `runRppMaskDecode` | CPU/RPP copy engine | 当前 CPU NMS 产生 selected anchor index，上传到 RPP SRAM |
 | coeff gather | `yolov11_seg_gather_selected_coefficients_kernel` / `launch_yolov11_seg_gather_selected_coefficients` | RPP kernel | 按 selected anchor index 从拆分后的 `seg_coeff[32, anchors]` 收集 `selected_coeff[S,32]` |
 | prototype combine | `yolov11_seg_combine_prototypes_kernel` / `launch_yolov11_seg_combine_prototypes` | RPP kernel | 在 SRAM 上执行 selected `coefficients x prototype` |
 | low-res threshold | `yolov11_seg_sigmoid_threshold_lowres_kernel` / `launch_yolov11_seg_sigmoid_threshold_lowres` | RPP kernel | 利用 sigmoid 单调性执行 `raw > logit(mask_threshold)`，输出 160x160 low-res binary |
-| source resize/crop | `buildMaskFromLowResBinary` | CPU | 将 low-res binary resize 到原图并按 box crop；完整 RPP 化拆成后续 SEG 专项 |
+| source resize/crop | `yolov11_seg_resize_raw_to_source_crop_kernel` / `launch_yolov11_seg_resize_raw_to_source_crop` | RPP kernel | 使用 `resized_width/resized_height + pad_left/pad_top` 做 letterbox-aware fixed-point bilinear，从 raw mask 直接生成 source dense mask 并按 source-space box crop |
+| source mask D2H/pack | `buildMaskFromSourceBinary` | CPU | 将 RPP 回传的 source dense float mask 转为 `uint8` dense mask |
 
 若需要完全 device 侧后处理，mask decode 可拆为 `GatherCoefficients`、`PrototypeMatmul`、`SigmoidThreshold`、`ResizeCrop` 等更小 RPP kernel。此前单个 monolithic finalize kernel 触发 RPP assembler 限制，因此 SEG finalize 建议单独分析和逐算子验证。
 
@@ -430,9 +431,10 @@ mask_prob[y, x] = sigmoid(mask_raw[y, x])
 当前可确认状态：
 
 - `det/seg split` 已具备 RPP kernel，输出 `det[84, anchors]` 和 `seg_coeff[32, anchors]`。
-- `det[84, anchors]` 已是 YOLOv11 det 后处理可消费的连续布局；下一步需要接入 det RT_NMS，并让 NMS 输出 selected anchor index。
+- `det[84, anchors]` 已是 YOLOv8/YOLOv11 det RT_NMS 预处理可消费的连续布局；下一步需要接入 `NMSPREPlugin + addNMS`，并让 NMS 输出 selected anchor index。
 - `seg` 已完成 RPP selected coeff gather、prototype combine 和 low-res threshold。
-- `seg` 尚未完成 source-size RPP finalize：resize、box crop、letterbox restore 仍在 CPU。
+- `seg` 已有 source-size RPP finalize：letterbox-aware fixed-point bilinear resize + source-space threshold/crop。
+- 仍需在目标板和 CPU/OpenCV reference 做 parity 验证。
 
 推荐将 SEG finalize 拆成两个实现级别。
 
@@ -532,7 +534,7 @@ SRAM 容量需要按 `max_segments` 控制：
 2. 增加 `GatherSelectedCoefficientsKernel`，去掉当前 CPU coefficient gather。
 3. 将已有 `CombinePrototypeKernel` 输出留在 SRAM，不再立即 D2H raw mask。
 4. 实现 `SigmoidThreshold160Kernel`，先验证低分辨率 binary mask。
-5. 实现 fused `ResizeRawMaskToSourceCropKernel`，直接生成 source dense/ROI mask。
+5. 实现 fused `ResizeRawMaskToSourceCropKernel`，直接生成 source dense/ROI mask。当前已落地 assembler-friendly 的 fixed-point bilinear 版本。
 6. 若 dense mask D2H 过大，再追加 `PackRleKernel` 或 ROI bitmap 输出。
 
 ### 10.4.5 正确性验证
