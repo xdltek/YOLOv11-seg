@@ -1,5 +1,7 @@
 # YOLOv11-SEG RPP 推理 Demo 设计 V2.0
 
+> 当前CPU_NMS完成版以`README.md`和`opt.md`描述的实现为准：RPP负责候选解码与Sparse ROI mask，CPU负责compact、排序和greedy NMS。本文中的NMSPREPlugin、OpenRT `addNMS`和RT_NMS内容属于后续V8设计目标，尚未进入当前默认执行路径。
+
 # 1. 背景与目标
 
 YOLOv11-SEG RPP 推理 Demo V2.0 目标是提供可复用、可测试、可扩展的 OpenRT on RPP 实例分割推理工程。

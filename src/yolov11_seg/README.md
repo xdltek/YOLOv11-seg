@@ -51,7 +51,7 @@ The actual input size and output dimensions are updated from `RppInferEngine` af
 
 ## Timing Contract
 
-`YoloV11SegStageTimes` reports H2D and D2H separately. `end_to_end_ms` is the sum of the printed `Preprocess`, `Inference`, and `Postprocess` stages and is used for FPS.
+`YoloV11SegStageTimes` reports H2D and D2H separately. `preprocess_ms` excludes input H2D and `postprocess_ms` excludes output D2H. `end_to_end_ms` is `Input H2D + Preprocess compute + Inference + Postprocess compute + Output D2H` and is used for FPS.
 
 ## Call Flow
 
@@ -67,7 +67,7 @@ Demo CLI
 
 ## Module Boundary
 
-This layer may know about YOLOv11-SEG output assumptions, COCO labels, visualization text, and pipeline timing. It should not own low-level OpenRT binding allocation, RPP preprocessing kernels, or RT_NMS engine construction details; those stay under `rpp/`.
+This layer may know about YOLOv11-SEG output assumptions, COCO labels, visualization text, and pipeline timing. It should not own low-level OpenRT binding allocation or RPP kernels; those stay under `rpp/`.
 
 ---
 
@@ -124,7 +124,7 @@ demo 默认使用 `YoloV11SegConfig` 中的配置，除非源码中显式修改�
 
 ## 计时约束
 
-`YoloV11SegStageTimes` 单独上报 H2D 和 D2H。`end_to_end_ms` 为打印的 `Preprocess`、`Inference` 和 `Postprocess` 三个阶段之和，并用于计算 FPS。
+`YoloV11SegStageTimes` 单独上报 H2D 和 D2H。`preprocess_ms` 不含输入 H2D，`postprocess_ms` 不含输出 D2H；`end_to_end_ms` 为 `Input H2D + Preprocess compute + Inference + Postprocess compute + Output D2H`，并用于计算 FPS。
 
 ## 调用流程
 
@@ -140,4 +140,4 @@ Demo CLI
 
 ## 模块边界
 
-本层可以包含 YOLOv11-SEG 输出假设、COCO 标签、可视化文本和 pipeline 计时逻辑。不应持有底层 OpenRT binding 分配、RPP 前处理 kernel 或 RT_NMS engine 构建细节；这些职责保留在 `rpp/` 模块中。
+本层可以包含YOLOv11-SEG输出假设、COCO标签、可视化文本和pipeline计时逻辑。不应持有底层OpenRT binding分配或RPP kernel实现；这些职责保留在`rpp/`模块中。

@@ -17,7 +17,7 @@ The project is organized from the existing `/home/azurengine/github/YOLOv11` det
 | `demos/yuv_frame` | I420 YUV single-frame demo entry |
 | `rpp/inference` | OpenRT engine wrapper with multi-output binding support |
 | `rpp/preprocess` | RPP preprocessing: upload, letterbox, color conversion, resize, normalize |
-| `rpp/postprocess` | YOLOv11-SEG RPP output split, CPU det decode/NMS, RPP prototype combine, CPU mask finalize |
+| `rpp/postprocess` | RPP candidate decode and sparse mask kernels, CPU sort/NMS, packed uint8 result return |
 | `src/yolov11_seg` | Pipeline, labels, result types, visualization |
 | `scripts` | Build, run, smoke test, benchmark helpers |
 | `internal_docs` | Design documents |
@@ -99,18 +99,17 @@ Visualization blends instance masks over the source image and draws the retained
 The current complete path is:
 
 1. copy model `output0` from DDR to SRAM
-2. run an RPP CUDA kernel to split `output0[116, anchors]` into `det[84, anchors]` and `seg_coeff[32, anchors]`
-3. copy split `det` and `seg_coeff` heads back to host staging buffers for the current CPU det/NMS path
-4. decode det `(cx, cy, w, h)` and class scores, then run greedy NMS
-5. upload selected anchor indices and copy prototype output to SRAM
-6. run an RPP CUDA kernel to gather selected `seg_coeff` rows from the full coefficient head
-7. run an RPP CUDA kernel to combine `coefficients x prototype` into selected low-resolution raw masks
-8. run an RPP CUDA kernel to threshold selected raw masks into low-resolution binary masks
-9. copy low-resolution binary masks back to host
-10. run an RPP CUDA kernel to resize the raw low-resolution mask to source-size dense mask, threshold it, and apply box crop
-11. render mask overlay and boxes
+2. decode box/class data and apply score threshold on RPP into fixed seven-field candidate slots
+3. copy candidate slots directly from SRAM to pinned Host memory
+4. compact valid candidates and run class-aware or agnostic greedy NMS on CPU
+5. upload selected anchor indices and packed ROI metadata directly to SRAM
+6. gather the selected 32-channel mask coefficients on RPP
+7. combine only the prototype regions required by the selected source-image ROIs
+8. bilinearly resize, threshold, and pack all ROI masks as uint8 on RPP
+9. copy the packed masks directly from SRAM to pinned Host memory and build final segmentations
+10. render mask overlays, boxes, and labels
 
-The `det[84, anchors]` output is now isolated in a YOLOv11 det-compatible layout. The next TODO is to replace the CPU greedy NMS call with the YOLOv8/YOLOv11-style RT_NMS path and return selected anchor indices directly from the device path. The source-size mask kernel uses fixed-point letterbox-aware bilinear sampling from the raw mask before thresholding.
+This release intentionally completes the CPU_NMS path. RT_NMS and full PRE/Infer/POST graph integration are deferred to the next version; they are not part of the current default execution path.
 
 ## Test
 
@@ -183,21 +182,17 @@ Benchmark logs are saved under `build/logs/`.
 
 ## Current Verification
 
-- `scripts/build.sh --skip-model`: passed
-- `scripts/test.sh`: passed
-- `scripts/build_postprocess_test.sh`: passed
-- `scripts/test_postprocess.sh`: passed
-- `cmake --build build -j$(nproc)`: passed with `rpp_postprocess_kernels.cu`
-- `cmake --build build -j$(nproc)`: passed after adding standalone postprocess accuracy-check mode
-- `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed on RPP with synthetic tensors; `min_box_iou=1.000000`, `min_mask_iou=0.999110`, `max_mask_diff_ratio=0.000105`
-- `scripts/build_postprocess_test.sh --perf` and `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed; code trace `/home/azurengine/github/trace/yolov11_seg_postprocess_test_37406.json`, driver trace `/tmp/rpp/rpp_trace_37406.json`; main postprocess hotspots were source resize/crop and D2H/source copy
-- `scripts/run_postprocess_test.sh --loop 20 --warmup 1 --accuracy-check`: passed after ROI/local mask optimization; `profile_total_ms=130.556`, `mask_decode_ms=85.521`, `mask_source_resize_crop_ms=4.830`, `mask_source_copy_ms=38.778`, `min_mask_iou=0.999110`
-- `scripts/run.sh --demo rgb --loop 1`: blocked by environment, `/usr/local/rpp/bin/rpp_server` reports `no RPP device found`
+- `cmake -S . -B build && cmake --build build -j2`: passed
+- `scripts/test.sh` and `scripts/test_postprocess.sh`: passed
+- `scripts/run_postprocess_test.sh --warmup 1 --loop 3 --accuracy-check --min-mask-iou 0.995`: passed; `min_box_iou=1.000000`, `min_mask_iou=0.999110`, `max_mask_diff_ratio=0.000105`
+- `scripts/run.sh --demo all --loop 1`: RGB and I420 demos passed on RPP
+- Latest single-loop RGB result: End-to-end `20.158 ms`, `49.607 FPS`
+- Latest single-loop I420 result: End-to-end `17.281 ms`, `57.866 FPS`
 
 ## Known Limitations
 
 - Runtime execution requires an available RPP device and working `rpp_server`.
-- Output split, selected coefficient gather, selected mask prototype combination, low-resolution mask threshold, and source-size raw-mask resize/crop run on RPP.
-- NMS remains CPU-based in this version; the split det head is prepared for the YOLOv8/YOLOv11 RT_NMS path.
-- Mask resize/crop now runs as an RPP fixed-point bilinear bbox-local kernel and returns `box.width x box.height` local masks; visualization supports both full-source and bbox-local masks.
+- Candidate decode, selected coefficient gather, Sparse Prototype ROI combine, and packed uint8 ROI resize/threshold run on RPP.
+- NMS remains CPU-based in this release; RT_NMS and selected-index device residency are deferred to the next version.
+- Final masks are returned as bbox-local packed uint8 buffers and exposed through the existing `Segmentation` result structure.
 - The output layout is validated for the local `yolo11s-seg.onnx` model shape. Other exports may need layout handling updates.

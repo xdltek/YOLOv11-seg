@@ -12,7 +12,9 @@
 #include <Infer.h>
 #include <opencv2/core.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 
 namespace
@@ -78,7 +80,6 @@ bool update_config_from_model(const RppInferEngine& infer_engine,
     config.detection_elements = detection_output.elements;
     config.prototype_dimensions = prototype_output.dimensions;
     config.prototype_elements = prototype_output.elements;
-
     if (config.input_width <= 0 || config.input_height <= 0 ||
         config.detection_elements == 0 || config.prototype_elements == 0) {
         std::cerr << "Invalid YOLOv11-SEG model tensor dimensions." << std::endl;
@@ -104,7 +105,17 @@ YoloV11SegPipeline::YoloV11SegPipeline() = default;
 /**
  * @brief Destroy module owners and release runtime resources.
  */
-YoloV11SegPipeline::~YoloV11SegPipeline() = default;
+YoloV11SegPipeline::~YoloV11SegPipeline()
+{
+    // Destroy stream consumers before releasing the pipeline-wide orchestration stream.
+    postprocessor_.reset();
+    preprocessor_.reset();
+    infer_engine_.reset();
+    if (stream_ != nullptr) {
+        rtStreamDestroy(stream_);
+        stream_ = nullptr;
+    }
+}
 
 /**
  * @brief Initialize model runtime, derive tensor shapes, and build postprocessing.
@@ -116,6 +127,10 @@ bool YoloV11SegPipeline::init(const YoloV11SegPipelineOptions& options, const st
     options_ = options;
     if (options_.inference_count <= 0) {
         options_.inference_count = 1;
+    }
+    if (stream_ == nullptr && rtStreamCreate(&stream_) != rtError_t::rtSuccess) {
+        std::cerr << "Failed to create YOLOv11-SEG pipeline stream." << std::endl;
+        return false;
     }
     config_ = options.config;
     if (!class_names.empty()) {
@@ -282,19 +297,22 @@ bool YoloV11SegPipeline::runInput(const void* data,
         if (!preprocessor_->run(input,
                                 infer_engine_->getInputDeviceBuffer(),
                                 letterbox,
-                                nullptr,
+                                stream_,
                                 &preprocess_profile)) {
             return false;
         }
-        // SRAM is temporary workspace; release it before postprocess needs its own runtime buffers.
-        preprocessor_->releaseSramBuffers();
+        // V7 keeps PRE SRAM persistent. Sparse POST buffers coexist within current SRAM capacity,
+        // avoiding per-frame rtFreeSram/rtMallocSram churn.
     }
     auto preprocess_stop = std::chrono::high_resolution_clock::now();
-    local_times.preprocess_ms = preprocess_profile.total_ms > 0.0 ?
-                                preprocess_profile.total_ms :
-                                elapsed_ms(preprocess_start, preprocess_stop);
+    const double preprocess_total_ms = preprocess_profile.total_ms > 0.0 ?
+                                       preprocess_profile.total_ms :
+                                       elapsed_ms(preprocess_start, preprocess_stop);
     local_times.input_h2d_ms = preprocess_profile.host_to_device_ms;
     local_times.input_h2d_bytes = preprocess_profile.host_to_device_bytes;
+    // RppYoloPreprocessor::total_ms starts after copyHostInputToDevice(), so it
+    // already represents preprocess compute/internal movement with H2D excluded.
+    local_times.preprocess_ms = std::max(0.0, preprocess_total_ms);
 
     auto inference_start = std::chrono::high_resolution_clock::now();
     {
@@ -318,23 +336,63 @@ bool YoloV11SegPipeline::runInput(const void* data,
                                  infer_engine_->getOutputDeviceBuffer(static_cast<size_t>(prototype_output_index_)),
                                  letterbox,
                                  segments,
-                                 nullptr,
+                                 stream_,
                                  &postprocess_profile)) {
             return false;
         }
     }
     auto postprocess_stop = std::chrono::high_resolution_clock::now();
-    local_times.postprocess_ms = postprocess_profile.total_ms > 0.0 ?
-                                 postprocess_profile.total_ms :
-                                 elapsed_ms(postprocess_start, postprocess_stop);
+    const double postprocess_total_ms = postprocess_profile.total_ms > 0.0 ?
+                                        postprocess_profile.total_ms :
+                                        elapsed_ms(postprocess_start, postprocess_stop);
     local_times.output_d2h_ms = postprocess_profile.device_to_host_ms;
     local_times.output_d2h_bytes = postprocess_profile.device_to_host_bytes;
+    // Report postprocess compute/control separately from D2H. The runtime calls are
+    // synchronous, so subtracting the measured D2H regions avoids double counting.
+    local_times.postprocess_ms = std::max(0.0, postprocess_total_ms - local_times.output_d2h_ms);
 
-    // End-to-end compute time follows the printed stage summary.
-    double compute_ms = local_times.preprocess_ms +
-                        local_times.inference_ms +
-                        local_times.postprocess_ms;
-    local_times.end_to_end_ms = compute_ms > 0.0 ? compute_ms : 0.0;
+    if (std::getenv("YOLO_POST_PROFILE") != nullptr) {
+        std::cout << "POST profile:"
+                  << " total=" << postprocess_total_ms
+                  << " output_to_host=" << postprocess_profile.device_to_host_ms
+                  << " split=" << postprocess_profile.split_ms
+                  << " split_d2s=" << postprocess_profile.split_d2s_ms
+                  << " split_kernel=" << postprocess_profile.split_kernel_ms
+                  << " candidate_decode=" << postprocess_profile.candidate_decode_ms
+                  << " candidate_decode_wall=" << postprocess_profile.candidate_decode_wall_ms
+                  << " candidate_return_wall=" << postprocess_profile.split_d2h_ms
+                  << " candidate_return_device=" << postprocess_profile.candidate_return_device_ms
+                  << " candidate_runtime_overhead=" << postprocess_profile.candidate_runtime_overhead_ms
+                  << " candidate_sort=" << postprocess_profile.candidate_sort_ms
+                  << " nms=" << postprocess_profile.nms_ms
+                  << " candidates=" << postprocess_profile.candidate_count
+                  << " segments=" << segments.size()
+                  << " mask_total=" << postprocess_profile.mask_decode_ms
+                  << " mask_setup=" << postprocess_profile.mask_setup_copy_ms
+                  << " prototype_d2s=" << postprocess_profile.mask_prototype_d2s_ms
+                  << " selected_metadata_h2s=" << postprocess_profile.mask_metadata_h2s_ms
+                  << " coeff_gather=" << postprocess_profile.mask_coeff_gather_ms
+                  << " proto_combine=" << postprocess_profile.mask_proto_combine_ms
+                  << " roi_resize=" << postprocess_profile.mask_source_resize_crop_ms
+                  << " fused_kernel_wall=" << postprocess_profile.mask_fused_kernel_ms
+                  << " mask_device_pipeline=" << postprocess_profile.mask_device_pipeline_ms
+                  << " mask_runtime_overhead=" << postprocess_profile.mask_runtime_overhead_ms
+                  << " mask_s2h=" << postprocess_profile.mask_source_copy_ms
+                  << " mask_cpu=" << postprocess_profile.mask_build_cpu_ms
+                  << " full_proto_pixels=" << postprocess_profile.mask_full_proto_pixels
+                  << " sparse_proto_pixels=" << postprocess_profile.mask_sparse_proto_pixels
+                  << " sparse_proto_coverage=" << postprocess_profile.mask_sparse_proto_coverage
+                  << " output_roi_pixels=" << postprocess_profile.mask_output_roi_pixels
+                  << std::endl;
+    }
+
+    // End-to-end latency contains every mutually exclusive printed stage exactly once.
+    double total_ms = local_times.input_h2d_ms +
+                      local_times.preprocess_ms +
+                      local_times.inference_ms +
+                      local_times.postprocess_ms +
+                      local_times.output_d2h_ms;
+    local_times.end_to_end_ms = total_ms > 0.0 ? total_ms : 0.0;
 
     if (times != nullptr) {
         *times = local_times;

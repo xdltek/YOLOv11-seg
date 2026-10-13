@@ -7,6 +7,8 @@
 
 #include "segmentation_types.h"
 
+#include <rpp_runtime.h>
+
 #include <opencv2/core.hpp>
 
 #include <cstddef>
@@ -139,6 +141,7 @@ private:
     int preprocessor_height_ = 0;
     int detection_output_index_ = -1;
     int prototype_output_index_ = -1;
+    rtStream_t stream_ = nullptr;
     bool initialized_ = false;
 };
 

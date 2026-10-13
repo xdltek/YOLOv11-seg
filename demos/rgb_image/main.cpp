@@ -55,14 +55,14 @@ void print_summary(const YoloV11SegStageTimes& times, int loop_count, const std:
               << "Input H2D: " << times.input_h2d_ms << " ms, "
               << times.input_h2d_bytes << " bytes, "
               << bytes_to_kib(times.input_h2d_bytes) << " KiB\n"
-              << "Preprocess: " << times.preprocess_ms << " ms\n"
+              << "Preprocess compute: " << times.preprocess_ms << " ms (excludes Input H2D)\n"
               << "Inference: " << times.inference_ms << " ms\n"
-              << "Postprocess: " << times.postprocess_ms << " ms\n"
-              << "Output D2H: " << times.output_d2h_ms << " ms, "
+              << "Postprocess compute: " << times.postprocess_ms << " ms (excludes Output to Host)\n"
+              << "Output to Host: " << times.output_d2h_ms << " ms, "
               << times.output_d2h_bytes << " bytes, "
               << bytes_to_kib(times.output_d2h_bytes) << " KiB\n"
               << "All time end to end: " << times.end_to_end_ms
-              << " ms (preprocess+inference+postprocess)\n"
+              << " ms (input H2D+preprocess compute+inference+postprocess compute+output to Host)\n"
               << "FPS: " << fps << "\n"
               << "Output path: " << output_path << std::endl;
 }

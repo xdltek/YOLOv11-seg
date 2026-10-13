@@ -17,7 +17,7 @@ Related documentation: [API documentation](../docs/api/README.md): public API in
 - `preprocess/`
   YOLO input preprocessing on RPP. It provides host-side wrapper code plus RPP kernels for RGB/BGR image input and I420 YUV frame input.
 - `postprocess/`
-  YOLOv11-SEG output postprocessing on RPP. It resolves YOLOv11-SEG tensor layouts, prepares RT_NMS inputs, runs NMS when supported, and returns compact detection results to the host.
+  YOLOv11-SEG hybrid postprocessing. RPP decodes candidates and generates sparse ROI masks; the CPU compacts, sorts, and runs greedy NMS.
 
 ## Call Flow
 
@@ -44,7 +44,7 @@ The normal single-image pipeline calls the RPP modules in this order:
            v
 +-----------------------+
 | YoloV11SegPostprocessor   |
-| decode + NMS on RPP   |
+| RPP decode + CPU NMS  |
 +-----------------------+
            |
            v
@@ -61,9 +61,9 @@ The RPP layer keeps intermediate tensors on the device whenever possible:
 - Input H2D happens before preprocessing. RGB/BGR demos copy decoded image bytes; YUV demos copy the I420 frame bytes.
 - Preprocessing output stays on the device and is consumed directly by `RppInferEngine`.
 - Inference output stays on the device and is consumed directly by `YoloV11SegPostprocessor`.
-- Output D2H copies only the compact postprocessed detection buffer required by the CPU to draw boxes or print results.
+- Candidate D2H copies seven-field candidate slots to pinned Host memory for CPU NMS. Final packed uint8 ROI masks return through a separate direct SRAM-to-Host copy.
 
-The CPU does not run YOLOv11-SEG decode or NMS in the normal RT_NMS path. A CPU fallback is kept for unsupported layouts or RT_NMS setup failure.
+The current release intentionally uses CPU greedy NMS. RPP performs class argmax, score thresholding, selected-coefficient gather, sparse prototype combine, and ROI resize/threshold. RT_NMS is reserved for a later version.
 
 ## Postprocess Contract
 
@@ -73,7 +73,7 @@ The CPU does not run YOLOv11-SEG decode or NMS in the normal RT_NMS path. A CPU 
 [C, N], [N, C], [1, C, N], [1, N, C]
 ```
 
-where `C = 4 + class_count`. The first four channels are `x, y, w, h`; class scores start after the box coordinates.
+where `C = 4 + class_count + mask_coeff_count`. The first four channels are `x, y, w, h`; class scores follow, then the mask coefficients.
 
 If a model uses a different output layout, update `YoloV11SegConfig`, the postprocess configuration, and detection parsing together.
 
@@ -85,7 +85,7 @@ Demos print stage-level timing:
 Input H2D -> Preprocess -> Inference -> Postprocess -> Output D2H
 ```
 
-`Input H2D` and `Output D2H` are reported as separate transfer fields. The printed end-to-end latency used for FPS is the sum of `Preprocess`, `Inference`, and `Postprocess`.
+`Input H2D` and `Output D2H` are reported as separate transfer fields. End-to-end latency used for FPS is the sum of all five mutually exclusive stages.
 
 The RPP modules expose these timings through their result structures. More detailed device-side events are captured by `rpp_perf` when the project is built with `YOLO_ENABLE_RPP_PERF=ON`.
 
@@ -110,7 +110,7 @@ For a non-YOLO model:
 
 `preprocess/RppYoloPreprocessor` should own only input tensor preparation. It should not know about labels, output boxes, visualization, or demo command-line options.
 
-`postprocess/YoloV11SegPostprocessor` should own only YOLOv11-SEG output tensor decoding and NMS. It should return compact detection records for host-side output handling or drawing.
+`postprocess/YoloV11SegPostprocessor` owns YOLOv11-SEG candidate decode, CPU NMS orchestration, sparse mask generation, and packed result return. It returns source-coordinate segmentations for host-side output handling or drawing.
 
 ---
 
@@ -133,7 +133,7 @@ For a non-YOLO model:
 - `preprocess/`
   YOLO 输入前处理的 RPP 实现。该目录包含 host 侧封装代码，以及面向 RGB/BGR 图片输入和 I420 YUV 帧输入的 RPP kernel。
 - `postprocess/`
-  YOLOv11-SEG 输出后处理的 RPP 实现。它解析 YOLOv11-SEG tensor layout，准备 RT_NMS 输入，在支持时执行 NMS，并将 compact 检测结果返回 host。
+  YOLOv11-SEG 混合后处理实现。RPP负责候选解码和Sparse ROI mask，CPU负责候选压缩、排序和greedy NMS。
 
 ## 调用流程
 
@@ -160,7 +160,7 @@ For a non-YOLO model:
            v
 +-----------------------+
 | YoloV11SegPostprocessor   |
-| RPP 上 decode + NMS   |
+| RPP decode + CPU NMS  |
 +-----------------------+
            |
            v
@@ -177,9 +177,9 @@ RPP 层会尽可能让中间 tensor 保留在 device 侧：
 - 输入 H2D 发生在前处理之前。RGB/BGR demo 复制解码后的图片字节；YUV demo 复制 I420 帧字节。
 - 前处理输出保留在 device 侧，并直接作为 `RppInferEngine` 的输入。
 - 推理输出保留在 device 侧，并直接作为 `YoloV11SegPostprocessor` 的输入。
-- 输出 D2H 只复制 compact 后的检测结果 buffer，CPU 使用该结果进行画框或打印。
+- Candidate通过SRAM到pinned Host传输供CPU NMS使用；最终packed uint8 ROI mask通过独立的SRAM到Host传输返回。
 
-常规 RT_NMS 路径中，CPU 不执行 YOLOv11-SEG decode 或 NMS。对于不支持的 layout 或 RT_NMS 初始化失败场景，保留 CPU fallback。
+当前版本明确使用CPU greedy NMS。RPP负责类别最大值、阈值过滤、selected coefficient gather、Sparse Prototype ROI combine及ROI resize/threshold；RT_NMS留给后续版本。
 
 ## 后处理约束
 
@@ -189,7 +189,7 @@ RPP 层会尽可能让中间 tensor 保留在 device 侧：
 [C, N], [N, C], [1, C, N], [1, N, C]
 ```
 
-其中 `C = 4 + class_count`。前四个通道为 `x, y, w, h`，类别分数位于 box 坐标之后。
+其中`C = 4 + class_count + mask_coeff_count`。前四个通道为`x, y, w, h`，随后是类别分数和mask coefficient。
 
 如果模型使用不同的输出 layout，需要同步更新 `YoloV11SegConfig`、后处理配置和检测结果解析逻辑。
 
@@ -201,7 +201,7 @@ demo 打印阶段级耗时：
 Input H2D -> Preprocess -> Inference -> Postprocess -> Output D2H
 ```
 
-`Input H2D` 和 `Output D2H` 作为独立传输字段打印。用于计算 FPS 的端到端耗时为 `Preprocess`、`Inference` 和 `Postprocess` 三个阶段之和。
+`Input H2D`和`Output D2H`作为独立传输字段打印。用于计算FPS的端到端耗时为五个互斥阶段之和。
 
 RPP 模块通过各自的结果结构暴露这些耗时。更细粒度的 device 侧事件由 `rpp_perf` 捕获：项目需要使用 `YOLO_ENABLE_RPP_PERF=ON` 构建。
 
@@ -226,4 +226,4 @@ RPP 模块通过各自的结果结构暴露这些耗时。更细粒度的 device
 
 `preprocess/RppYoloPreprocessor` 只负责输入 tensor 准备，不应关心标签、输出框、可视化或 demo 命令行参数。
 
-`postprocess/YoloV11SegPostprocessor` 只负责 YOLOv11-SEG 输出 tensor 解码和 NMS，并向 host 输出 compact 检测记录，用于后续打印或绘制。
+`postprocess/YoloV11SegPostprocessor`负责YOLOv11-SEG候选解码、CPU NMS调度、Sparse ROI mask生成和packed结果回传，并向Host输出原图坐标系下的实例分割结果。

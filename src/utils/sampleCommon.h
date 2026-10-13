@@ -315,6 +315,8 @@ inline uint32_t getElementSize(infer1::DataType t) {
             return 4;
         case infer1::DataType::kHALF:
             return 2;
+        case infer1::DataType::kBF:
+            return 2;
         case infer1::DataType::kINT8:
             return 1;
         default:

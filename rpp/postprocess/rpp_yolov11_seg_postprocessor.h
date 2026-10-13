@@ -11,6 +11,7 @@
 #include <rpp_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 /**
@@ -25,16 +26,32 @@ struct YoloV11SegPostprocessProfile
     double split_kernel_ms = 0.0;
     double split_s2d_ms = 0.0;
     double split_d2h_ms = 0.0;
+    double candidate_decode_ms = 0.0;
+    double candidate_decode_wall_ms = 0.0;
+    double candidate_return_device_ms = 0.0;
+    double candidate_runtime_overhead_ms = 0.0;
+    double candidate_sort_ms = 0.0;
+    double nms_ms = 0.0;
     double decode_nms_ms = 0.0;
+    size_t candidate_count = 0;
     double mask_decode_ms = 0.0;
     double mask_setup_copy_ms = 0.0;
+    double mask_prototype_d2s_ms = 0.0;
+    double mask_metadata_h2s_ms = 0.0;
     double mask_coeff_gather_ms = 0.0;
     double mask_proto_combine_ms = 0.0;
     double mask_lowres_threshold_ms = 0.0;
     double mask_box_copy_ms = 0.0;
     double mask_source_resize_crop_ms = 0.0;
+    double mask_fused_kernel_ms = 0.0;
+    double mask_device_pipeline_ms = 0.0;
+    double mask_runtime_overhead_ms = 0.0;
     double mask_source_copy_ms = 0.0;
     double mask_build_cpu_ms = 0.0;
+    size_t mask_full_proto_pixels = 0;
+    size_t mask_sparse_proto_pixels = 0;
+    size_t mask_output_roi_pixels = 0;
+    double mask_sparse_proto_coverage = 0.0;
     double total_ms = 0.0;
 };
 
@@ -89,12 +106,17 @@ private:
 
     bool resolveDetectionLayout();
     bool resolvePrototypeLayout();
-    bool runRppSplitOutput(const void* detection_output_device, YoloV11SegPostprocessProfile* profile);
+    bool runRppSplitOutput(const void* detection_output_device,
+                           const LetterboxInfo& letterbox,
+                           std::vector<Candidate>& candidates,
+                           YoloV11SegPostprocessProfile* profile);
     float detectionValueAt(int channel, int anchor) const;
     float coefficientValueAt(int coeff, int anchor) const;
     float prototypeValueAt(int coeff, int y, int x) const;
     void decodeCandidates(const LetterboxInfo& letterbox, std::vector<Candidate>& candidates) const;
-    void runNms(const std::vector<Candidate>& candidates, std::vector<int>& keep) const;
+    void runNms(const std::vector<Candidate>& candidates,
+                std::vector<int>& keep,
+                YoloV11SegPostprocessProfile* profile) const;
     bool runRppMaskDecode(const void* prototype_output_device,
                           const LetterboxInfo& letterbox,
                           const std::vector<Candidate>& candidates,
@@ -113,13 +135,14 @@ private:
                                    int source_width,
                                    int source_height,
                                    Segmentation& segment) const;
-    void buildMaskFromBoxBinary(const float* box_mask,
+    void buildMaskFromBoxBinary(const uint8_t* box_mask,
                                 int box_width,
                                 int box_height,
                                 Segmentation& segment) const;
     void buildMask(const Candidate& candidate, const LetterboxInfo& letterbox, Segmentation& segment) const;
     bool ensureDeviceBuffer(void** buffer, size_t* capacity, size_t required_bytes);
     bool ensureSramBuffer(void** buffer, size_t* capacity, size_t required_bytes);
+    bool ensureHostPinnedBuffer(void** buffer, size_t* capacity, size_t required_bytes);
     void releaseMaskDecodeBuffers();
 
     YoloV11SegConfig config_;
@@ -133,48 +156,49 @@ private:
     std::vector<float> host_det_head_;
     std::vector<float> host_coeff_head_;
     std::vector<float> host_prototype_;
-    std::vector<float> host_coefficients_;
-    std::vector<float> host_raw_masks_;
     std::vector<int> host_selected_anchor_indices_;
     std::vector<int> host_selected_box_;
-    std::vector<float> host_lowres_masks_;
-    std::vector<float> host_source_mask_;
+    std::vector<int> host_mask_offsets_;
+    std::vector<int> host_coordinate_lut_key_;
+    std::vector<int> host_source_x0_lut_;
+    std::vector<float> host_source_wx_lut_;
+    std::vector<int> host_source_y0_lut_;
+    std::vector<float> host_source_wy_lut_;
     void* prototype_sram_ = nullptr;
-    void* coefficients_device_ = nullptr;
     void* coefficients_sram_ = nullptr;
-    void* raw_masks_device_ = nullptr;
     void* raw_masks_sram_ = nullptr;
-    void* selected_indices_device_ = nullptr;
-    void* selected_indices_sram_ = nullptr;
-    void* binary_masks_device_ = nullptr;
-    void* binary_masks_sram_ = nullptr;
-    void* selected_box_device_ = nullptr;
-    void* selected_box_sram_ = nullptr;
-    void* source_mask_device_ = nullptr;
+    void* metadata_sram_ = nullptr;
     void* source_mask_sram_ = nullptr;
     void* split_input_sram_ = nullptr;
-    void* det_head_device_ = nullptr;
     void* det_head_sram_ = nullptr;
     void* coeff_head_device_ = nullptr;
     void* coeff_head_sram_ = nullptr;
+    void* candidate_slots_sram_ = nullptr;
+    void* host_candidate_records_pinned_ = nullptr;
+    void* host_source_mask_pinned_ = nullptr;
+    void* host_metadata_pinned_ = nullptr;
     size_t prototype_sram_capacity_ = 0;
-    size_t coefficients_device_capacity_ = 0;
     size_t coefficients_sram_capacity_ = 0;
-    size_t raw_masks_device_capacity_ = 0;
     size_t raw_masks_sram_capacity_ = 0;
-    size_t selected_indices_device_capacity_ = 0;
-    size_t selected_indices_sram_capacity_ = 0;
-    size_t binary_masks_device_capacity_ = 0;
-    size_t binary_masks_sram_capacity_ = 0;
-    size_t selected_box_device_capacity_ = 0;
-    size_t selected_box_sram_capacity_ = 0;
-    size_t source_mask_device_capacity_ = 0;
+    size_t metadata_sram_capacity_ = 0;
     size_t source_mask_sram_capacity_ = 0;
     size_t split_input_sram_capacity_ = 0;
-    size_t det_head_device_capacity_ = 0;
     size_t det_head_sram_capacity_ = 0;
     size_t coeff_head_device_capacity_ = 0;
     size_t coeff_head_sram_capacity_ = 0;
+    size_t candidate_slots_sram_capacity_ = 0;
+    size_t host_candidate_records_pinned_capacity_ = 0;
+    size_t host_source_mask_pinned_capacity_ = 0;
+    size_t host_metadata_pinned_capacity_ = 0;
+    rtStream_t stream_ = nullptr;
+    rtEvent_t candidate_event_start_ = nullptr;
+    rtEvent_t candidate_event_decode_end_ = nullptr;
+    rtEvent_t candidate_event_copy_end_ = nullptr;
+    rtEvent_t mask_event_setup_start_ = nullptr;
+    rtEvent_t mask_event_start_ = nullptr;
+    rtEvent_t mask_event_gather_end_ = nullptr;
+    rtEvent_t mask_event_combine_end_ = nullptr;
+    rtEvent_t mask_event_resize_end_ = nullptr;
     bool initialized_ = false;
 };
 

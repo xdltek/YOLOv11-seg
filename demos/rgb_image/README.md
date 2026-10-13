@@ -113,16 +113,16 @@ Summary:
 Loop count: <loop>
 Loop time: average per measured loop after warmup
 Input H2D: <ms> ms, <bytes> bytes, <KiB> KiB
-Preprocess: <ms> ms
+Preprocess compute: <ms> ms (excludes Input H2D)
 Inference: <ms> ms
-Postprocess: <ms> ms
+Postprocess compute: <ms> ms (excludes Output D2H)
 Output D2H: <ms> ms, <bytes> bytes, <KiB> KiB
-All time end to end: <ms> ms (preprocess+inference+postprocess)
+All time end to end: <ms> ms (input H2D+preprocess compute+inference+postprocess compute+output D2H)
 FPS: <fps>
 Output path: ../output/output_rgb_seg.jpg
 ```
 
-`Input H2D` and `Output D2H` are printed separately. `All time end to end` is the sum of the printed `Preprocess`, `Inference`, and `Postprocess` stages and is used for FPS.
+`Input H2D` and `Output D2H` are printed separately. `Preprocess compute` excludes input H2D and `Postprocess compute` excludes output D2H. `All time end to end` sums all five mutually exclusive stages and is used for FPS.
 
 The rendered image is saved to `build/output/output_rgb_seg.jpg` by default.
 
@@ -252,16 +252,16 @@ Summary:
 Loop count: <loop>
 Loop time: average per measured loop after warmup
 Input H2D: <ms> ms, <bytes> bytes, <KiB> KiB
-Preprocess: <ms> ms
+Preprocess compute: <ms> ms（不含 Input H2D）
 Inference: <ms> ms
-Postprocess: <ms> ms
+Postprocess compute: <ms> ms（不含 Output D2H）
 Output D2H: <ms> ms, <bytes> bytes, <KiB> KiB
-All time end to end: <ms> ms (preprocess+inference+postprocess)
+All time end to end: <ms> ms (input H2D+preprocess compute+inference+postprocess compute+output D2H)
 FPS: <fps>
 Output path: ../output/output_rgb_seg.jpg
 ```
 
-`Input H2D` 和 `Output D2H` 单独打印。`All time end to end` 为打印的 `Preprocess`、`Inference` 和 `Postprocess` 三个阶段之和，并用于计算 FPS。
+`Preprocess compute` 不含输入 H2D，`Postprocess compute` 不含输出 D2H。`All time end to end` 为五个互斥阶段之和，并用于计算 FPS。
 
 绘制后的图片默认保存到 `build/output/output_rgb_seg.jpg`。
 

@@ -127,6 +127,7 @@ target_include_directories(rpp_yolov11_seg_postprocess PRIVATE
     ${YOLO_UTILS_INCLUDE_DIR}
 )
 target_link_libraries(rpp_yolov11_seg_postprocess PUBLIC perf_trace yolov11_seg_utils ${rpprt_libs} ${OpenCV_LIBS})
+target_compile_options(rpp_yolov11_seg_postprocess PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O3>)
 set_target_properties(rpp_yolov11_seg_postprocess PROPERTIES
     BUILD_RPATH "$ORIGIN;${RppRT_LIBS}"
 )

@@ -620,15 +620,32 @@ void print_profile(const YoloV11SegPostprocessProfile& profile,
               << "  output_d2h_bytes: " << profile.device_to_host_bytes
               << " bytes (" << bytes_to_kib(profile.device_to_host_bytes) << " KiB)\n"
               << "  decode_nms_ms: " << profile.decode_nms_ms << " ms\n"
+              << "    candidate_decode_device_ms: " << profile.candidate_decode_ms << " ms\n"
+              << "    candidate_decode_wall_ms: " << profile.candidate_decode_wall_ms << " ms\n"
+              << "    candidate_return_wall_ms: " << profile.split_d2h_ms << " ms\n"
+              << "    candidate_return_device_ms: " << profile.candidate_return_device_ms << " ms\n"
+              << "    candidate_runtime_overhead_ms: " << profile.candidate_runtime_overhead_ms << " ms\n"
+              << "    candidate_sort_ms: " << profile.candidate_sort_ms << " ms\n"
+              << "    nms_ms: " << profile.nms_ms << " ms\n"
+              << "    candidate_count: " << profile.candidate_count << "\n"
               << "  mask_decode_ms: " << profile.mask_decode_ms << " ms\n"
               << "    mask_setup_copy_ms: " << profile.mask_setup_copy_ms << " ms\n"
+              << "      prototype_d2s_ms: " << profile.mask_prototype_d2s_ms << " ms\n"
+              << "      selected_metadata_h2s_ms: " << profile.mask_metadata_h2s_ms << " ms\n"
               << "    mask_coeff_gather_ms: " << profile.mask_coeff_gather_ms << " ms\n"
               << "    mask_proto_combine_ms: " << profile.mask_proto_combine_ms << " ms\n"
               << "    mask_lowres_threshold_ms: " << profile.mask_lowres_threshold_ms << " ms\n"
               << "    mask_box_copy_ms: " << profile.mask_box_copy_ms << " ms\n"
               << "    mask_source_resize_crop_ms: " << profile.mask_source_resize_crop_ms << " ms\n"
+              << "    mask_fused_kernel_ms: " << profile.mask_fused_kernel_ms << " ms\n"
+              << "    mask_device_pipeline_ms: " << profile.mask_device_pipeline_ms << " ms\n"
+              << "    mask_runtime_overhead_ms: " << profile.mask_runtime_overhead_ms << " ms\n"
               << "    mask_source_copy_ms: " << profile.mask_source_copy_ms << " ms\n"
               << "    mask_build_cpu_ms: " << profile.mask_build_cpu_ms << " ms\n"
+              << "    full_proto_pixels: " << profile.mask_full_proto_pixels << "\n"
+              << "    sparse_proto_pixels: " << profile.mask_sparse_proto_pixels << "\n"
+              << "    sparse_proto_coverage: " << profile.mask_sparse_proto_coverage << "\n"
+              << "    output_roi_pixels: " << profile.mask_output_roi_pixels << "\n"
               << "  profile_total_ms: " << profile.total_ms << " ms\n"
               << "  outer_call_ms: " << outer_ms << " ms\n"
               << "  output_segments: " << segment_count << std::endl;
@@ -806,15 +823,31 @@ int main(int argc, char** argv)
         total_profile.split_s2d_ms += profile.split_s2d_ms;
         total_profile.split_d2h_ms += profile.split_d2h_ms;
         total_profile.decode_nms_ms += profile.decode_nms_ms;
+        total_profile.candidate_decode_ms += profile.candidate_decode_ms;
+        total_profile.candidate_decode_wall_ms += profile.candidate_decode_wall_ms;
+        total_profile.candidate_return_device_ms += profile.candidate_return_device_ms;
+        total_profile.candidate_runtime_overhead_ms += profile.candidate_runtime_overhead_ms;
+        total_profile.candidate_sort_ms += profile.candidate_sort_ms;
+        total_profile.nms_ms += profile.nms_ms;
+        total_profile.candidate_count += profile.candidate_count;
         total_profile.mask_decode_ms += profile.mask_decode_ms;
         total_profile.mask_setup_copy_ms += profile.mask_setup_copy_ms;
+        total_profile.mask_prototype_d2s_ms += profile.mask_prototype_d2s_ms;
+        total_profile.mask_metadata_h2s_ms += profile.mask_metadata_h2s_ms;
         total_profile.mask_coeff_gather_ms += profile.mask_coeff_gather_ms;
         total_profile.mask_proto_combine_ms += profile.mask_proto_combine_ms;
         total_profile.mask_lowres_threshold_ms += profile.mask_lowres_threshold_ms;
         total_profile.mask_box_copy_ms += profile.mask_box_copy_ms;
         total_profile.mask_source_resize_crop_ms += profile.mask_source_resize_crop_ms;
+        total_profile.mask_fused_kernel_ms += profile.mask_fused_kernel_ms;
+        total_profile.mask_device_pipeline_ms += profile.mask_device_pipeline_ms;
+        total_profile.mask_runtime_overhead_ms += profile.mask_runtime_overhead_ms;
         total_profile.mask_source_copy_ms += profile.mask_source_copy_ms;
         total_profile.mask_build_cpu_ms += profile.mask_build_cpu_ms;
+        total_profile.mask_full_proto_pixels += profile.mask_full_proto_pixels;
+        total_profile.mask_sparse_proto_pixels += profile.mask_sparse_proto_pixels;
+        total_profile.mask_output_roi_pixels += profile.mask_output_roi_pixels;
+        total_profile.mask_sparse_proto_coverage += profile.mask_sparse_proto_coverage;
         total_profile.total_ms += profile.total_ms;
     }
 
@@ -828,15 +861,35 @@ int main(int argc, char** argv)
     average_profile.split_s2d_ms = total_profile.split_s2d_ms * inv_loop;
     average_profile.split_d2h_ms = total_profile.split_d2h_ms * inv_loop;
     average_profile.decode_nms_ms = total_profile.decode_nms_ms * inv_loop;
+    average_profile.candidate_decode_ms = total_profile.candidate_decode_ms * inv_loop;
+    average_profile.candidate_decode_wall_ms = total_profile.candidate_decode_wall_ms * inv_loop;
+    average_profile.candidate_return_device_ms = total_profile.candidate_return_device_ms * inv_loop;
+    average_profile.candidate_runtime_overhead_ms = total_profile.candidate_runtime_overhead_ms * inv_loop;
+    average_profile.candidate_sort_ms = total_profile.candidate_sort_ms * inv_loop;
+    average_profile.nms_ms = total_profile.nms_ms * inv_loop;
+    average_profile.candidate_count = total_profile.candidate_count / static_cast<size_t>(loop);
     average_profile.mask_decode_ms = total_profile.mask_decode_ms * inv_loop;
     average_profile.mask_setup_copy_ms = total_profile.mask_setup_copy_ms * inv_loop;
+    average_profile.mask_prototype_d2s_ms = total_profile.mask_prototype_d2s_ms * inv_loop;
+    average_profile.mask_metadata_h2s_ms = total_profile.mask_metadata_h2s_ms * inv_loop;
     average_profile.mask_coeff_gather_ms = total_profile.mask_coeff_gather_ms * inv_loop;
     average_profile.mask_proto_combine_ms = total_profile.mask_proto_combine_ms * inv_loop;
     average_profile.mask_lowres_threshold_ms = total_profile.mask_lowres_threshold_ms * inv_loop;
     average_profile.mask_box_copy_ms = total_profile.mask_box_copy_ms * inv_loop;
     average_profile.mask_source_resize_crop_ms = total_profile.mask_source_resize_crop_ms * inv_loop;
+    average_profile.mask_fused_kernel_ms = total_profile.mask_fused_kernel_ms * inv_loop;
+    average_profile.mask_device_pipeline_ms = total_profile.mask_device_pipeline_ms * inv_loop;
+    average_profile.mask_runtime_overhead_ms = total_profile.mask_runtime_overhead_ms * inv_loop;
     average_profile.mask_source_copy_ms = total_profile.mask_source_copy_ms * inv_loop;
     average_profile.mask_build_cpu_ms = total_profile.mask_build_cpu_ms * inv_loop;
+    average_profile.mask_full_proto_pixels =
+        total_profile.mask_full_proto_pixels / static_cast<size_t>(loop);
+    average_profile.mask_sparse_proto_pixels =
+        total_profile.mask_sparse_proto_pixels / static_cast<size_t>(loop);
+    average_profile.mask_output_roi_pixels =
+        total_profile.mask_output_roi_pixels / static_cast<size_t>(loop);
+    average_profile.mask_sparse_proto_coverage =
+        total_profile.mask_sparse_proto_coverage * inv_loop;
     average_profile.total_ms = total_profile.total_ms * inv_loop;
 
     std::cout << "YOLOv11-SEG postprocess standalone test\n"
