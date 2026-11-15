@@ -1,6 +1,6 @@
 # YOLOv11-SEG RPP 推理 Demo 设计 V2.0
 
-> 当前CPU_NMS完成版以`README.md`和`opt.md`描述的实现为准：RPP负责候选解码与Sparse ROI mask，CPU负责compact、排序和greedy NMS。本文中的NMSPREPlugin、OpenRT `addNMS`和RT_NMS内容属于后续V8设计目标，尚未进入当前默认执行路径。
+> 2026-11-15 V8 redesign: the default postprocess now uses an OpenRT `addNMS` helper engine on RPP. CPU compact/sort/greedy NMS has been removed. Selected-index mask reconstruction remains on the existing sparse RPP path; host code only assembles compact result objects and prepares variable-size ROI metadata.
 
 # 1. 背景与目标
 
@@ -419,7 +419,7 @@ mask_prob[y, x] = sigmoid(mask_raw[y, x])
 | det/seg split | `yolov11_seg_split_det_coeff_kernel` / `launch_yolov11_seg_split_det_coeff` | RPP kernel | 将 `[116, anchors]` 拆成 `det[84, anchors]` 和 `seg_coeff[32, anchors]` |
 | det decode | `decodeCandidates` | CPU | 当前读取拆分后的 det staging buffer，后续替换为 YOLOv11 det postprocess |
 | NMS | `runNms` | CPU | TODO：参考 `/home/azurengine/github/YOLOv8/rpp/postprocess` 或 `/home/azurengine/github/YOLOv11` 的 `NMSPREPlugin + addNMS` 路径，并返回 selected anchor index |
-| selected anchor H2D/SRAM | `runRppMaskDecode` | CPU/RPP copy engine | 当前 CPU NMS 产生 selected anchor index，上传到 RPP SRAM |
+| selected anchor H2D/SRAM | `runRppMaskDecode` | RT NMS/RPP copy engine | RT NMS产生selected anchor index，Host仅整理可变长ROI metadata后上传RPP SRAM |
 | coeff gather | `yolov11_seg_gather_selected_coefficients_kernel` / `launch_yolov11_seg_gather_selected_coefficients` | RPP kernel | 按 selected anchor index 从拆分后的 `seg_coeff[32, anchors]` 收集 `selected_coeff[S,32]` |
 | prototype combine | `yolov11_seg_combine_prototypes_kernel` / `launch_yolov11_seg_combine_prototypes` | RPP kernel | 在 SRAM 上执行 selected `coefficients x prototype` |
 | low-res threshold | `yolov11_seg_sigmoid_threshold_lowres_kernel` / `launch_yolov11_seg_sigmoid_threshold_lowres` | RPP kernel | 利用 sigmoid 单调性执行 `raw > logit(mask_threshold)`，输出 160x160 low-res binary |

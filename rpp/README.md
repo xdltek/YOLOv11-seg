@@ -17,7 +17,7 @@ Related documentation: [API documentation](../docs/api/README.md): public API in
 - `preprocess/`
   YOLO input preprocessing on RPP. It provides host-side wrapper code plus RPP kernels for RGB/BGR image input and I420 YUV frame input.
 - `postprocess/`
-  YOLOv11-SEG hybrid postprocessing. RPP decodes candidates and generates sparse ROI masks; the CPU compacts, sorts, and runs greedy NMS.
+  YOLOv11-SEG RPP postprocessing. An OpenRT helper engine performs prediction preparation and RT NMS; RPP kernels generate sparse ROI masks.
 
 ## Call Flow
 
@@ -44,7 +44,7 @@ The normal single-image pipeline calls the RPP modules in this order:
            v
 +-----------------------+
 | YoloV11SegPostprocessor   |
-| RPP decode + CPU NMS  |
+| RPP prepare + RT NMS  |
 +-----------------------+
            |
            v
@@ -61,9 +61,9 @@ The RPP layer keeps intermediate tensors on the device whenever possible:
 - Input H2D happens before preprocessing. RGB/BGR demos copy decoded image bytes; YUV demos copy the I420 frame bytes.
 - Preprocessing output stays on the device and is consumed directly by `RppInferEngine`.
 - Inference output stays on the device and is consumed directly by `YoloV11SegPostprocessor`.
-- Candidate D2H copies seven-field candidate slots to pinned Host memory for CPU NMS. Final packed uint8 ROI masks return through a separate direct SRAM-to-Host copy.
+- RT NMS indices and BF16 box/score metadata return to pinned Host memory for compact result assembly. Final packed uint8 ROI masks return through a separate direct SRAM-to-Host copy.
 
-The current release intentionally uses CPU greedy NMS. RPP performs class argmax, score thresholding, selected-coefficient gather, sparse prototype combine, and ROI resize/threshold. RT_NMS is reserved for a later version.
+The current release runs candidate preparation and greedy suppression through OpenRT RT NMS on RPP. Selected-coefficient gather, sparse prototype combine, and ROI resize/threshold also run on RPP.
 
 ## Postprocess Contract
 
@@ -110,7 +110,7 @@ For a non-YOLO model:
 
 `preprocess/RppYoloPreprocessor` should own only input tensor preparation. It should not know about labels, output boxes, visualization, or demo command-line options.
 
-`postprocess/YoloV11SegPostprocessor` owns YOLOv11-SEG candidate decode, CPU NMS orchestration, sparse mask generation, and packed result return. It returns source-coordinate segmentations for host-side output handling or drawing.
+`postprocess/YoloV11SegPostprocessor` owns YOLOv11-SEG RT NMS orchestration, sparse mask generation, and packed result return. It returns source-coordinate segmentations for host-side output handling or drawing.
 
 ---
 
@@ -133,7 +133,7 @@ For a non-YOLO model:
 - `preprocess/`
   YOLO 输入前处理的 RPP 实现。该目录包含 host 侧封装代码，以及面向 RGB/BGR 图片输入和 I420 YUV 帧输入的 RPP kernel。
 - `postprocess/`
-  YOLOv11-SEG 混合后处理实现。RPP负责候选解码和Sparse ROI mask，CPU负责候选压缩、排序和greedy NMS。
+  YOLOv11-SEG RPP后处理实现。OpenRT helper engine在RPP执行prediction准备和RT NMS，RPP kernel生成Sparse ROI mask。
 
 ## 调用流程
 
@@ -160,7 +160,7 @@ For a non-YOLO model:
            v
 +-----------------------+
 | YoloV11SegPostprocessor   |
-| RPP decode + CPU NMS  |
+| RPP prepare + RT NMS  |
 +-----------------------+
            |
            v
@@ -177,9 +177,9 @@ RPP 层会尽可能让中间 tensor 保留在 device 侧：
 - 输入 H2D 发生在前处理之前。RGB/BGR demo 复制解码后的图片字节；YUV demo 复制 I420 帧字节。
 - 前处理输出保留在 device 侧，并直接作为 `RppInferEngine` 的输入。
 - 推理输出保留在 device 侧，并直接作为 `YoloV11SegPostprocessor` 的输入。
-- Candidate通过SRAM到pinned Host传输供CPU NMS使用；最终packed uint8 ROI mask通过独立的SRAM到Host传输返回。
+- RT NMS index及BF16 box/score metadata回传pinned Host用于紧凑结果组装；最终packed uint8 ROI mask通过独立的SRAM到Host传输返回。
 
-当前版本明确使用CPU greedy NMS。RPP负责类别最大值、阈值过滤、selected coefficient gather、Sparse Prototype ROI combine及ROI resize/threshold；RT_NMS留给后续版本。
+当前版本通过OpenRT RT NMS在RPP执行候选准备和greedy suppression；selected coefficient gather、Sparse Prototype ROI combine及ROI resize/threshold同样在RPP执行。
 
 ## 后处理约束
 
@@ -226,4 +226,4 @@ RPP 模块通过各自的结果结构暴露这些耗时。更细粒度的 device
 
 `preprocess/RppYoloPreprocessor` 只负责输入 tensor 准备，不应关心标签、输出框、可视化或 demo 命令行参数。
 
-`postprocess/YoloV11SegPostprocessor`负责YOLOv11-SEG候选解码、CPU NMS调度、Sparse ROI mask生成和packed结果回传，并向Host输出原图坐标系下的实例分割结果。
+`postprocess/YoloV11SegPostprocessor`负责YOLOv11-SEG RT NMS调度、Sparse ROI mask生成和packed结果回传，并向Host输出原图坐标系下的实例分割结果。

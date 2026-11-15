@@ -21,6 +21,24 @@
 namespace
 {
 using ProfileClock = std::chrono::high_resolution_clock;
+constexpr int kRppNmsMaxOutputBoxesPerClass = 512;
+
+class PostprocessLogger : public infer1::ILogger
+{
+public:
+    void log(Severity severity, const char* message) override
+    {
+        if (severity <= Severity::kERROR) {
+            std::cerr << "[YOLOv11-SEG RPP postprocess] " << message << std::endl;
+        }
+    }
+};
+
+PostprocessLogger& postprocess_logger()
+{
+    static PostprocessLogger logger;
+    return logger;
+}
 
 double elapsed_ms(ProfileClock::time_point start)
 {
@@ -50,6 +68,33 @@ bool check_rpp(RPPresult status, const char* what)
     }
     std::cerr << what << " failed, RPPresult=" << static_cast<int>(status) << std::endl;
     return false;
+}
+
+int dims_volume(const infer1::Dims& dims)
+{
+    int result = 1;
+    for (int i = 0; i < dims.nbDims; ++i) {
+        if (dims.d[i] <= 0 || result > std::numeric_limits<int>::max() / dims.d[i]) {
+            return 0;
+        }
+        result *= dims.d[i];
+    }
+    return result;
+}
+
+uint16_t float_to_bf16(float value)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return static_cast<uint16_t>(bits >> 16);
+}
+
+float bf16_to_float(uint16_t value)
+{
+    uint32_t bits = static_cast<uint32_t>(value) << 16;
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
 }
 
 std::vector<int> compact_dims(const infer1::Dims& dims)
@@ -92,6 +137,7 @@ cv::Rect clip_rect_to_image(float left, float top, float right, float bottom, in
 YoloV11SegPostprocessor::~YoloV11SegPostprocessor()
 {
     releaseMaskDecodeBuffers();
+    resetRppNmsEngine();
     if (mask_event_resize_end_ != nullptr) {
         rtEventDestroy(mask_event_resize_end_);
     }
@@ -122,6 +168,26 @@ YoloV11SegPostprocessor::~YoloV11SegPostprocessor()
     }
 }
 
+void YoloV11SegPostprocessor::releaseSramBuffers()
+{
+    auto release = [](void** buffer, size_t* capacity) {
+        if (*buffer != nullptr) {
+            rtFreeSram(*buffer);
+            *buffer = nullptr;
+        }
+        *capacity = 0;
+    };
+    release(&prototype_sram_, &prototype_sram_capacity_);
+    release(&coefficients_sram_, &coefficients_sram_capacity_);
+    release(&raw_masks_sram_, &raw_masks_sram_capacity_);
+    release(&metadata_sram_, &metadata_sram_capacity_);
+    release(&source_mask_sram_, &source_mask_sram_capacity_);
+    release(&split_input_sram_, &split_input_sram_capacity_);
+    release(&det_head_sram_, &det_head_sram_capacity_);
+    release(&coeff_head_sram_, &coeff_head_sram_capacity_);
+    release(&candidate_slots_sram_, &candidate_slots_sram_capacity_);
+}
+
 bool YoloV11SegPostprocessor::init(const YoloV11SegConfig& config)
 {
     if (config.detection_elements == 0 || config.prototype_elements == 0 ||
@@ -137,6 +203,13 @@ bool YoloV11SegPostprocessor::init(const YoloV11SegConfig& config)
     total_head_channels_ = det_channels_ + config_.mask_coeff_count;
     if (!resolveDetectionLayout() || !resolvePrototypeLayout()) {
         std::cerr << "Unsupported YOLOv11-SEG output dimensions." << std::endl;
+        return false;
+    }
+
+    resetRppNmsEngine();
+    if (!buildRppNmsEngine() || !allocateRppNmsBuffers() || !copyRppNmsConstants()) {
+        std::cerr << "Failed to initialize YOLOv11-SEG RPP RT-NMS path." << std::endl;
+        resetRppNmsEngine();
         return false;
     }
 
@@ -210,23 +283,16 @@ bool YoloV11SegPostprocessor::run(const void* detection_output_device,
 
     auto total_start = ProfileClock::now();
     std::vector<Candidate> candidates;
+    std::vector<int> keep;
+    auto stage_start = ProfileClock::now();
     {
-        PERF_SCOPE_CATE("postprocess_split_output", "postprocess");
-        if (!runRppSplitOutput(detection_output_device, letterbox, candidates, profile)) {
+        PERF_SCOPE_CATE("postprocess_rt_nms_rpp", "postprocess");
+        if (!runRppNms(detection_output_device, letterbox, candidates, keep, profile)) {
             return false;
         }
     }
-
-    auto stage_start = ProfileClock::now();
     if (profile != nullptr) {
         profile->candidate_count = candidates.size();
-    }
-    std::vector<int> keep;
-    {
-        PERF_SCOPE_CATE("postprocess_nms_cpu", "postprocess");
-        runNms(candidates, keep, profile);
-    }
-    if (profile != nullptr) {
         profile->decode_nms_ms = elapsed_ms(stage_start);
     }
 
@@ -326,6 +392,286 @@ bool YoloV11SegPostprocessor::run(const void* detection_output_device,
                   << std::endl;
     }
     return true;
+}
+
+bool YoloV11SegPostprocessor::buildRppNmsEngine()
+{
+    std::unique_ptr<infer1::IBuilder> builder {infer1::createInferBuilder(postprocess_logger())};
+    std::unique_ptr<infer1::INetworkDefinition> network {
+        builder == nullptr ? nullptr : builder->createNetwork()};
+    std::unique_ptr<infer1::IBuilderConfig> builder_config {
+        builder == nullptr ? nullptr : builder->createBuilderConfig()};
+    if (builder == nullptr || network == nullptr || builder_config == nullptr) {
+        return false;
+    }
+
+    infer1::Dims raw_dims{};
+    raw_dims.nbDims = 2;
+    raw_dims.d[0] = split_input_channels_first_ ? total_head_channels_ : detection_layout_.anchors;
+    raw_dims.d[1] = split_input_channels_first_ ? detection_layout_.anchors : total_head_channels_;
+    infer1::ITensor* raw = network->addInput("yolov11_seg_prediction", infer1::DataType::kFLOAT, raw_dims);
+    if (raw == nullptr) {
+        return false;
+    }
+
+    infer1::ITensor* rows = raw;
+    if (split_input_channels_first_) {
+        infer1::IShuffleLayer* transpose = network->addShuffle(*raw);
+        if (transpose == nullptr) return false;
+        infer1::Permutation permutation{};
+        permutation.order[0] = 1;
+        permutation.order[1] = 0;
+        transpose->setFirstTranspose(permutation);
+        rows = transpose->getOutput(0);
+    }
+    infer1::IIdentityLayer* cast = network->addIdentity(*rows);
+    if (cast == nullptr) return false;
+    cast->setPrecision(infer1::DataType::kBF);
+    cast->setOutputType(0, infer1::DataType::kBF);
+    cast->getOutput(0)->setType(infer1::DataType::kBF);
+
+    infer1::Dims start{};
+    start.nbDims = 2;
+    infer1::Dims stride{};
+    stride.nbDims = 2;
+    stride.d[0] = stride.d[1] = 1;
+    infer1::Dims box_size{};
+    box_size.nbDims = 2;
+    box_size.d[0] = detection_layout_.anchors;
+    box_size.d[1] = 4;
+    infer1::ISliceLayer* boxes = network->addSlice(*cast->getOutput(0), start, box_size, stride);
+    if (boxes == nullptr) return false;
+    boxes->setPrecision(infer1::DataType::kBF);
+    boxes->setOutputType(0, infer1::DataType::kBF);
+    boxes->getOutput(0)->setType(infer1::DataType::kBF);
+    boxes->getOutput(0)->setName("rpp_nms_boxes");
+
+    start.d[1] = 4;
+    infer1::Dims score_size{};
+    score_size.nbDims = 2;
+    score_size.d[0] = detection_layout_.anchors;
+    score_size.d[1] = config_.class_count;
+    infer1::ISliceLayer* scores = network->addSlice(*cast->getOutput(0), start, score_size, stride);
+    if (scores == nullptr) return false;
+    scores->setPrecision(infer1::DataType::kBF);
+    scores->setOutputType(0, infer1::DataType::kBF);
+    scores->getOutput(0)->setType(infer1::DataType::kBF);
+    scores->getOutput(0)->setName("rpp_nms_scores");
+
+    infer1::Dims scalar{};
+    scalar.nbDims = 1;
+    scalar.d[0] = 1;
+    infer1::ITensor* max_output = network->addInput("rpp_nms_max_output", infer1::DataType::kINT32, scalar);
+    infer1::ITensor* iou = network->addInput("rpp_nms_iou_threshold", infer1::DataType::kBF, scalar);
+    infer1::ITensor* score = network->addInput("rpp_nms_score_threshold", infer1::DataType::kBF, scalar);
+    if (max_output == nullptr || iou == nullptr || score == nullptr) {
+        return false;
+    }
+
+    infer1::ITensor* nms_scores = scores->getOutput(0);
+    if (config_.agnostic) {
+        infer1::IReduceLayer* best = network->addReduce(
+            *nms_scores, infer1::ReduceOperation::kMAX, 1U << 1U, true);
+        if (best == nullptr) return false;
+        best->setPrecision(infer1::DataType::kBF);
+        best->setOutputType(0, infer1::DataType::kBF);
+        best->getOutput(0)->setType(infer1::DataType::kBF);
+        nms_scores = best->getOutput(0);
+    }
+    infer1::INMSLayer* nms = network->addNMS(*boxes->getOutput(0), *nms_scores, *max_output);
+    if (nms == nullptr) {
+        return false;
+    }
+    nms->setBoundingBoxFormat(infer1::BoundingBoxFormat::kCENTER_SIZES);
+    nms->setInput(3, *iou);
+    nms->setInput(4, *score);
+    nms->setPrecision(infer1::DataType::kBF);
+    nms->setOutputType(0, infer1::DataType::kINT32);
+    nms->setOutputType(1, infer1::DataType::kINT32);
+    nms->setHasBoxConfidence(false);
+    nms->setIsAgnostic(false);
+    nms->getOutput(0)->setName("rpp_nms_indices");
+    nms->getOutput(1)->setName("rpp_nms_count");
+
+    network->markOutput(*boxes->getOutput(0));
+    network->markOutput(*scores->getOutput(0));
+    network->markOutput(*nms->getOutput(0));
+    network->markOutput(*nms->getOutput(1));
+    builder->setMaxBatchSize(1);
+    builder_config->setMaxWorkspaceSize(static_cast<size_t>(16) << 20);
+    builder_config->setFlag(infer1::BuilderFlag::kBF16);
+    nms_engine_.reset(builder->buildEngineWithConfig(*network, *builder_config));
+    nms_context_.reset(nms_engine_ == nullptr ? nullptr : nms_engine_->createExecutionContext());
+    if (nms_engine_ == nullptr || nms_context_ == nullptr) {
+        return false;
+    }
+
+    nms_input_index_ = nms_engine_->getBindingIndex("yolov11_seg_prediction");
+    nms_boxes_index_ = nms_engine_->getBindingIndex("rpp_nms_boxes");
+    nms_scores_index_ = nms_engine_->getBindingIndex("rpp_nms_scores");
+    nms_max_output_index_ = nms_engine_->getBindingIndex("rpp_nms_max_output");
+    nms_iou_threshold_index_ = nms_engine_->getBindingIndex("rpp_nms_iou_threshold");
+    nms_score_threshold_index_ = nms_engine_->getBindingIndex("rpp_nms_score_threshold");
+    nms_indices_index_ = nms_engine_->getBindingIndex("rpp_nms_indices");
+    nms_count_index_ = nms_engine_->getBindingIndex("rpp_nms_count");
+    if (nms_input_index_ < 0 || nms_boxes_index_ < 0 || nms_scores_index_ < 0 ||
+        nms_max_output_index_ < 0 || nms_iou_threshold_index_ < 0 ||
+        nms_score_threshold_index_ < 0 || nms_indices_index_ < 0 || nms_count_index_ < 0) {
+        return false;
+    }
+    const infer1::Dims indices_dims = nms_engine_->getBindingDimensions(nms_indices_index_);
+    nms_indices_elements_ = dims_volume(indices_dims);
+    nms_count_elements_ = dims_volume(nms_engine_->getBindingDimensions(nms_count_index_));
+    if (indices_dims.nbDims > 0) {
+        const int tuple = indices_dims.d[indices_dims.nbDims - 1];
+        if (tuple == 2 || tuple == 3) {
+            nms_index_tuple_size_ = tuple;
+        }
+    }
+    return nms_indices_elements_ > 0 && nms_count_elements_ > 0;
+}
+
+bool YoloV11SegPostprocessor::allocateRppNmsBuffers()
+{
+    nms_boxes_bytes_ = static_cast<size_t>(detection_layout_.anchors) * 4U * sizeof(uint16_t);
+    nms_scores_bytes_ = static_cast<size_t>(detection_layout_.anchors) *
+                        static_cast<size_t>(config_.class_count) * sizeof(uint16_t);
+    const size_t indices_bytes = static_cast<size_t>(nms_indices_elements_) * sizeof(int32_t);
+    nms_outputs_bytes_ = indices_bytes + static_cast<size_t>(nms_count_elements_) * sizeof(int32_t);
+    return check_rt(rtMalloc(&nms_boxes_device_, nms_boxes_bytes_), "rtMalloc RT-NMS boxes") &&
+           check_rt(rtMalloc(&nms_scores_device_, nms_scores_bytes_), "rtMalloc RT-NMS scores") &&
+           check_rt(rtMalloc(&nms_constants_device_, sizeof(int32_t) + 2U * sizeof(uint16_t)), "rtMalloc RT-NMS constants") &&
+           check_rt(rtMalloc(&nms_outputs_device_, nms_outputs_bytes_), "rtMalloc RT-NMS outputs") &&
+           check_rt(rtHostAlloc(&nms_boxes_host_, nms_boxes_bytes_, rtHostAllocDefault), "rtHostAlloc RT-NMS boxes") &&
+           check_rt(rtHostAlloc(&nms_scores_host_, nms_scores_bytes_, rtHostAllocDefault), "rtHostAlloc RT-NMS scores") &&
+           check_rt(rtHostAlloc(&nms_outputs_host_, nms_outputs_bytes_, rtHostAllocDefault), "rtHostAlloc RT-NMS outputs");
+}
+
+bool YoloV11SegPostprocessor::copyRppNmsConstants()
+{
+    struct Constants { int32_t max_output; uint16_t iou; uint16_t score; } constants {
+        kRppNmsMaxOutputBoxesPerClass,
+        float_to_bf16(config_.nms_threshold),
+        float_to_bf16(config_.score_threshold)};
+    return check_rt(rtMemcpy(nms_constants_device_, &constants, sizeof(constants), rtMemcpyHostToDevice),
+                    "rtMemcpy RT-NMS constants");
+}
+
+bool YoloV11SegPostprocessor::runRppNms(const void* detection_output_device,
+                                        const LetterboxInfo& letterbox,
+                                        std::vector<Candidate>& candidates,
+                                        std::vector<int>& keep,
+                                        YoloV11SegPostprocessProfile* profile)
+{
+    std::vector<void*> bindings(static_cast<size_t>(nms_engine_->getNbBindings()), nullptr);
+    auto* constants = static_cast<unsigned char*>(nms_constants_device_);
+    const size_t indices_bytes = static_cast<size_t>(nms_indices_elements_) * sizeof(int32_t);
+    bindings[static_cast<size_t>(nms_input_index_)] = const_cast<void*>(detection_output_device);
+    bindings[static_cast<size_t>(nms_boxes_index_)] = nms_boxes_device_;
+    bindings[static_cast<size_t>(nms_scores_index_)] = nms_scores_device_;
+    bindings[static_cast<size_t>(nms_max_output_index_)] = constants;
+    bindings[static_cast<size_t>(nms_iou_threshold_index_)] = constants + sizeof(int32_t);
+    bindings[static_cast<size_t>(nms_score_threshold_index_)] = constants + sizeof(int32_t) + sizeof(uint16_t);
+    bindings[static_cast<size_t>(nms_indices_index_)] = nms_outputs_device_;
+    bindings[static_cast<size_t>(nms_count_index_)] = static_cast<unsigned char*>(nms_outputs_device_) + indices_bytes;
+
+    auto stage_start = ProfileClock::now();
+    if (!nms_context_->enqueue(1, bindings.data(), stream_, nullptr) ||
+        !check_rt(rtStreamSynchronize(stream_), "rtStreamSynchronize YOLOv11-SEG RT-NMS")) {
+        return false;
+    }
+    if (profile != nullptr) {
+        profile->nms_ms = elapsed_ms(stage_start);
+        profile->candidate_decode_ms = profile->nms_ms;
+    }
+
+    stage_start = ProfileClock::now();
+    if (!check_rt(rtMemcpyAsync(nms_outputs_host_, nms_outputs_device_, nms_outputs_bytes_,
+                                rtMemcpyDeviceToHost, stream_), "rtMemcpyAsync RT-NMS outputs") ||
+        !check_rt(rtMemcpyAsync(nms_boxes_host_, nms_boxes_device_, nms_boxes_bytes_,
+                                rtMemcpyDeviceToHost, stream_), "rtMemcpyAsync RT-NMS boxes") ||
+        !check_rt(rtMemcpyAsync(nms_scores_host_, nms_scores_device_, nms_scores_bytes_,
+                                rtMemcpyDeviceToHost, stream_), "rtMemcpyAsync RT-NMS scores") ||
+        !check_rt(rtStreamSynchronize(stream_), "rtStreamSynchronize RT-NMS D2H")) {
+        return false;
+    }
+    if (profile != nullptr) {
+        profile->split_d2h_ms = elapsed_ms(stage_start);
+        profile->device_to_host_ms += profile->split_d2h_ms;
+        profile->device_to_host_bytes += nms_outputs_bytes_ + nms_boxes_bytes_ + nms_scores_bytes_;
+    }
+    return parseRppNmsResults(letterbox, candidates, keep);
+}
+
+bool YoloV11SegPostprocessor::parseRppNmsResults(const LetterboxInfo& letterbox,
+                                                  std::vector<Candidate>& candidates,
+                                                  std::vector<int>& keep) const
+{
+    const auto* indices = static_cast<const int32_t*>(nms_outputs_host_);
+    const auto* count = reinterpret_cast<const int32_t*>(
+        static_cast<const unsigned char*>(nms_outputs_host_) +
+        static_cast<size_t>(nms_indices_elements_) * sizeof(int32_t));
+    const auto* boxes = static_cast<const uint16_t*>(nms_boxes_host_);
+    const auto* scores = static_cast<const uint16_t*>(nms_scores_host_);
+    const int capacity = nms_indices_elements_ / nms_index_tuple_size_;
+    const int selected = std::max(0, std::min({count[0], capacity, config_.max_segments}));
+    candidates.reserve(static_cast<size_t>(selected));
+    keep.reserve(static_cast<size_t>(selected));
+    for (int i = 0; i < selected; ++i) {
+        const size_t tuple = static_cast<size_t>(i) * static_cast<size_t>(nms_index_tuple_size_);
+        int class_id = indices[tuple + static_cast<size_t>(nms_index_tuple_size_ - 2)];
+        const int anchor = indices[tuple + static_cast<size_t>(nms_index_tuple_size_ - 1)];
+        if (anchor < 0 || anchor >= detection_layout_.anchors) {
+            continue;
+        }
+        const uint16_t* anchor_scores = scores + static_cast<size_t>(anchor) * config_.class_count;
+        if (config_.agnostic) {
+            class_id = 0;
+            for (int candidate = 1; candidate < config_.class_count; ++candidate) {
+                if (bf16_to_float(anchor_scores[candidate]) > bf16_to_float(anchor_scores[class_id])) {
+                    class_id = candidate;
+                }
+            }
+        }
+        if (class_id < 0 || class_id >= config_.class_count) {
+            continue;
+        }
+        const uint16_t* box = boxes + static_cast<size_t>(anchor) * 4U;
+        const float cx = bf16_to_float(box[0]);
+        const float cy = bf16_to_float(box[1]);
+        const float width = bf16_to_float(box[2]);
+        const float height = bf16_to_float(box[3]);
+        Candidate result;
+        result.anchor = anchor;
+        result.class_id = class_id;
+        result.score = bf16_to_float(anchor_scores[class_id]);
+        result.box = clip_rect_to_image(
+            (cx - width * 0.5f - letterbox.pad_x) / letterbox.scale,
+            (cy - height * 0.5f - letterbox.pad_y) / letterbox.scale,
+            (cx + width * 0.5f - letterbox.pad_x) / letterbox.scale,
+            (cy + height * 0.5f - letterbox.pad_y) / letterbox.scale,
+            letterbox.source_width, letterbox.source_height);
+        if (!result.box.empty() && result.score >= config_.score_threshold) {
+            keep.push_back(static_cast<int>(candidates.size()));
+            candidates.push_back(result);
+        }
+    }
+    return true;
+}
+
+void YoloV11SegPostprocessor::resetRppNmsEngine()
+{
+    if (nms_boxes_device_ != nullptr) rtFree(nms_boxes_device_);
+    if (nms_scores_device_ != nullptr) rtFree(nms_scores_device_);
+    if (nms_constants_device_ != nullptr) rtFree(nms_constants_device_);
+    if (nms_outputs_device_ != nullptr) rtFree(nms_outputs_device_);
+    if (nms_boxes_host_ != nullptr) rtFreeHost(nms_boxes_host_);
+    if (nms_scores_host_ != nullptr) rtFreeHost(nms_scores_host_);
+    if (nms_outputs_host_ != nullptr) rtFreeHost(nms_outputs_host_);
+    nms_boxes_device_ = nms_scores_device_ = nms_constants_device_ = nms_outputs_device_ = nullptr;
+    nms_boxes_host_ = nms_scores_host_ = nms_outputs_host_ = nullptr;
+    nms_context_.reset();
+    nms_engine_.reset();
 }
 
 bool YoloV11SegPostprocessor::resolveDetectionLayout()

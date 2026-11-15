@@ -1,6 +1,9 @@
 build/
 old/
 *.onnx
+*.engine
+*.engine.fnv1a
+.engine_cache/
 *.o
 *.so
 *.bc

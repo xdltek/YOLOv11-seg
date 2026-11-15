@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 build_dir="${ROOT_DIR}/build"
-model_path="${ROOT_DIR}/weights/yolo11s-seg.onnx"
+model_path="${ROOT_DIR}/weights/yolo11s-seg_640x640_sim.onnx"
 
 show_help() {
     cat <<'EOF'
@@ -13,7 +13,7 @@ Usage: scripts/test.sh [options]
 
 Options:
   -b, --build-dir DIR   Build directory. Default: build
-  -m, --model PATH      ONNX model path. Default: weights/yolo11s-seg.onnx
+  -m, --model PATH      ONNX model path. Default: weights/yolo11s-seg_640x640_sim.onnx
   -h, --help            Show this help message.
 EOF
 }

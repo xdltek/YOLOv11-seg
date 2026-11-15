@@ -4,10 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-DEFAULT_MODEL_DIR="${ROOT_DIR}/weights"
-DEFAULT_MODEL_PATH="${DEFAULT_MODEL_DIR}/yolo11s-seg.onnx"
-LOCAL_MODEL_CANDIDATE="${ROOT_DIR}/yolo11s-seg.onnx"
-DEFAULT_MODEL_MD5=""
 CMAKE_GENERATOR_NAME="Unix Makefiles"
 
 show_help() {
@@ -17,36 +13,8 @@ Usage: scripts/build.sh [options]
 Options:
   -b, --build-dir DIR   Build directory. Default: build
       --perf            Enable YOLO_ENABLE_RPP_PERF.
-      --skip-model      Do not prepare or verify the default YOLOv11-SEG ONNX model.
   -h, --help            Show this help message.
 EOF
-}
-
-ensure_default_model() {
-    mkdir -p "${DEFAULT_MODEL_DIR}"
-
-    if [[ -f "${DEFAULT_MODEL_PATH}" && -z "${DEFAULT_MODEL_MD5}" ]]; then
-        return 0
-    fi
-
-    if [[ -f "${DEFAULT_MODEL_PATH}" ]] &&
-        echo "${DEFAULT_MODEL_MD5}  ${DEFAULT_MODEL_PATH}" | md5sum -c -
-    then
-        return 0
-    fi
-
-    if [[ -f "${LOCAL_MODEL_CANDIDATE}" ]]; then
-        echo "Preparing default model from ${LOCAL_MODEL_CANDIDATE}"
-        cp "${LOCAL_MODEL_CANDIDATE}" "${DEFAULT_MODEL_PATH}"
-        if [[ -n "${DEFAULT_MODEL_MD5}" ]]; then
-            echo "${DEFAULT_MODEL_MD5}  ${DEFAULT_MODEL_PATH}" | md5sum -c -
-        fi
-        return 0
-    fi
-
-    echo "Default model is missing: ${DEFAULT_MODEL_PATH}" >&2
-    echo "Place yolo11s-seg.onnx at ${LOCAL_MODEL_CANDIDATE} or ${DEFAULT_MODEL_PATH}, or pass --skip-model." >&2
-    exit 1
 }
 
 resolve_repo_path() {
@@ -114,7 +82,6 @@ ensure_compatible_build_dir() {
 
 build_dir="build"
 enable_perf="OFF"
-skip_model="OFF"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -124,10 +91,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --perf)
             enable_perf="ON"
-            shift
-            ;;
-        --skip-model)
-            skip_model="ON"
             shift
             ;;
         -h|--help)
@@ -141,10 +104,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-if [[ "${skip_model}" != "ON" ]]; then
-    ensure_default_model
-fi
 
 build_dir="$(resolve_repo_path "${build_dir}")"
 clean_build_outputs

@@ -8,10 +8,12 @@
 #include "segmentation_types.h"
 #include "rpp_postprocess_kernels.cuh"
 
+#include <InferRuntime.h>
 #include <rpp_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 /**
@@ -56,12 +58,11 @@ struct YoloV11SegPostprocessProfile
 };
 
 /**
- * @brief YOLOv11-SEG CPU postprocessor.
+ * @brief YOLOv11-SEG RPP postprocessor.
  *
- * The first complete demo path keeps preprocessing and inference on RPP, then copies
- * detection/prototype outputs to host and performs SEG decode. This preserves correctness
- * for two-output Ultralytics segmentation ONNX models while leaving RT_NMS/device mask
- * decode as a focused optimization step.
+ * Candidate preparation and RT NMS execute in an OpenRT engine on RPP. Selected
+ * mask coefficients, prototype combination, resize, crop, and threshold also run
+ * on RPP; the host only assembles the compact result objects.
  */
 class YoloV11SegPostprocessor
 {
@@ -86,6 +87,11 @@ public:
              rtStream_t stream = nullptr,
              YoloV11SegPostprocessProfile* profile = nullptr);
 
+    /**
+     * @brief Release transient SRAM while retaining engines and host/DDR buffers.
+     */
+    void releaseSramBuffers();
+
 private:
     struct OutputLayout
     {
@@ -106,6 +112,18 @@ private:
 
     bool resolveDetectionLayout();
     bool resolvePrototypeLayout();
+    bool buildRppNmsEngine();
+    bool allocateRppNmsBuffers();
+    bool copyRppNmsConstants();
+    bool runRppNms(const void* detection_output_device,
+                   const LetterboxInfo& letterbox,
+                   std::vector<Candidate>& candidates,
+                   std::vector<int>& keep,
+                   YoloV11SegPostprocessProfile* profile);
+    bool parseRppNmsResults(const LetterboxInfo& letterbox,
+                            std::vector<Candidate>& candidates,
+                            std::vector<int>& keep) const;
+    void resetRppNmsEngine();
     bool runRppSplitOutput(const void* detection_output_device,
                            const LetterboxInfo& letterbox,
                            std::vector<Candidate>& candidates,
@@ -153,6 +171,29 @@ private:
     int det_channels_ = 0;
     int total_head_channels_ = 0;
     bool split_input_channels_first_ = true;
+    std::unique_ptr<infer1::ICudaEngine> nms_engine_;
+    std::unique_ptr<infer1::IExecutionContext> nms_context_;
+    int nms_input_index_ = -1;
+    int nms_boxes_index_ = -1;
+    int nms_scores_index_ = -1;
+    int nms_max_output_index_ = -1;
+    int nms_iou_threshold_index_ = -1;
+    int nms_score_threshold_index_ = -1;
+    int nms_indices_index_ = -1;
+    int nms_count_index_ = -1;
+    int nms_indices_elements_ = 0;
+    int nms_count_elements_ = 0;
+    int nms_index_tuple_size_ = 3;
+    void* nms_boxes_device_ = nullptr;
+    void* nms_scores_device_ = nullptr;
+    void* nms_constants_device_ = nullptr;
+    void* nms_outputs_device_ = nullptr;
+    void* nms_boxes_host_ = nullptr;
+    void* nms_scores_host_ = nullptr;
+    void* nms_outputs_host_ = nullptr;
+    size_t nms_boxes_bytes_ = 0;
+    size_t nms_scores_bytes_ = 0;
+    size_t nms_outputs_bytes_ = 0;
     std::vector<float> host_det_head_;
     std::vector<float> host_coeff_head_;
     std::vector<float> host_prototype_;

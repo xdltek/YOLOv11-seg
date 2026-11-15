@@ -49,7 +49,7 @@ Run a measured benchmark for the RGB demo:
 scripts/benchmark.sh --demo rgb --loop 20
 ```
 
-The script uses the default model at `weights/yolo11s-seg.onnx`, the copied input image at `build/assets/test.jpg`, and the output path `build/output/output_rgb_seg.jpg`.
+The script uses the default model at `weights/yolo11s-seg_640x640_sim.onnx`, the copied input image at `build/assets/test.jpg`, and the output path `build/output/output_rgb_seg.jpg`.
 
 To use another image through the script:
 
@@ -61,18 +61,18 @@ After building, the binary can also be executed directly:
 
 ```shell
 build/bin/yolov11_seg_rgb_image_demo \
-  -o weights/yolo11s-seg.onnx \
+  -o weights/yolo11s-seg_640x640_sim.onnx \
   -i build/assets/test.jpg \
-  --output build/output/output_rgb_seg.jpg \
+  -o build/output/output_rgb_seg.jpg \
   -l 1
 ```
 
 ## Arguments
 
 ```text
--o, --onnx      ONNX model path. Default: ../../weights/yolo11s-seg.onnx
--i, --image     RGB/BGR image path. Default: ../assets/test.jpg
---output        Rendered output image path. Default: ../output/output_rgb_seg.jpg
+-m, --model     ONNX model path. Default: ../../weights/yolo11s-seg_640x640_sim.onnx
+-i, --input     RGB/BGR image path. Default: ../assets/test.jpg
+-o, --output    Rendered output image path. Default: ../output/output_rgb_seg.jpg
 -l, --loop      Measured loop count after one warmup pass. Default: 1
 -v, --verbose   Enable verbose runtime logging.
 ```
@@ -103,26 +103,30 @@ Draw boxes and save rendered image
 
 ## Output
 
-The demo prints model and input paths first, then a timing summary:
+The demo prints structured stages, progress, and a performance report:
 
 ```text
-Model path: ../../weights/yolo11s-seg.onnx
-Inference image path: ../assets/test.jpg
+[LOAD    ] Decoding RGB/BGR input image
+[INIT    ] Loading or building OpenRT inference engine on RPP accelerator
+[WARMUP  ] Running 1 unmeasured frame for stable performance
+[BENCH   ] Measuring <loop> full-pipeline frames
+[RUNNING ] [==============================] 100%  <loop>/<loop> frames
 
-Summary:
-Loop count: <loop>
-Loop time: average per measured loop after warmup
-Input H2D: <ms> ms, <bytes> bytes, <KiB> KiB
-Preprocess compute: <ms> ms (excludes Input H2D)
-Inference: <ms> ms
-Postprocess compute: <ms> ms (excludes Output D2H)
-Output D2H: <ms> ms, <bytes> bytes, <KiB> KiB
-All time end to end: <ms> ms (input H2D+preprocess compute+inference+postprocess compute+output D2H)
-FPS: <fps>
-Output path: ../output/output_rgb_seg.jpg
+YOLOv11-SEG PERFORMANCE REPORT
+End-to-end FPS           : <fps> FPS
+OpenRT inference FPS     : <fps> FPS
+End-to-end latency       : <ms> ms / frame
+Instances (last frame)   : <count>
+Input H2D transfer       : <ms> ms  (<KiB> KiB)
+Preprocess               : <ms> ms
+OpenRT inference         : <ms> ms
+Postprocess              : <ms> ms
+Output D2H transfer      : <ms> ms  (<KiB> KiB)
+Visualization            : ../output/output_rgb_seg.jpg
+[SUCCESS ] Inference completed successfully.
 ```
 
-`Input H2D` and `Output D2H` are printed separately. `Preprocess compute` excludes input H2D and `Postprocess compute` excludes output D2H. `All time end to end` sums all five mutually exclusive stages and is used for FPS.
+`Input H2D transfer` and `Output D2H transfer` are printed separately.
 
 The rendered image is saved to `build/output/output_rgb_seg.jpg` by default.
 
@@ -188,7 +192,7 @@ scripts/run.sh --demo rgb
 scripts/benchmark.sh --demo rgb --loop 20
 ```
 
-脚本默认使用 `weights/yolo11s-seg.onnx` 模型、`build/assets/test.jpg` 输入图片，并将结果保存到 `build/output/output_rgb_seg.jpg`。
+脚本默认使用 `weights/yolo11s-seg_640x640_sim.onnx` 模型、`build/assets/test.jpg` 输入图片，并将结果保存到 `build/output/output_rgb_seg.jpg`。
 
 通过脚本使用其他图片：
 
@@ -200,18 +204,18 @@ scripts/run.sh --demo rgb --input /path/to/image.jpg
 
 ```shell
 build/bin/yolov11_seg_rgb_image_demo \
-  -o weights/yolo11s-seg.onnx \
+  -o weights/yolo11s-seg_640x640_sim.onnx \
   -i build/assets/test.jpg \
-  --output build/output/output_rgb_seg.jpg \
+  -o build/output/output_rgb_seg.jpg \
   -l 1
 ```
 
 ## 参数
 
 ```text
--o, --onnx      ONNX 模型路径。默认：../../weights/yolo11s-seg.onnx
--i, --image     RGB/BGR 图片路径。默认：../assets/test.jpg
---output        绘制检测框后的输出图片路径。默认：../output/output_rgb_seg.jpg
+-m, --model     ONNX 模型路径。默认：../../weights/yolo11s-seg_640x640_sim.onnx
+-i, --input     RGB/BGR 图片路径。默认：../assets/test.jpg
+-o, --output    绘制分割结果后的输出图片路径。默认：../output/output_rgb_seg.jpg
 -l, --loop      warmup 之后的测量 loop 次数。默认：1
 -v, --verbose   开启更详细的运行时日志。
 ```
@@ -242,26 +246,30 @@ Warmup：完整执行一次 pipeline
 
 ## 输出
 
-demo 会先打印模型和输入路径，然后打印计时摘要：
+Demo 打印结构化阶段、进度条和性能报告：
 
 ```text
-Model path: ../../weights/yolo11s-seg.onnx
-Inference image path: ../assets/test.jpg
+[LOAD    ] Decoding RGB/BGR input image
+[INIT    ] Loading or building OpenRT inference engine on RPP accelerator
+[WARMUP  ] Running 1 unmeasured frame for stable performance
+[BENCH   ] Measuring <loop> full-pipeline frames
+[RUNNING ] [==============================] 100%  <loop>/<loop> frames
 
-Summary:
-Loop count: <loop>
-Loop time: average per measured loop after warmup
-Input H2D: <ms> ms, <bytes> bytes, <KiB> KiB
-Preprocess compute: <ms> ms（不含 Input H2D）
-Inference: <ms> ms
-Postprocess compute: <ms> ms（不含 Output D2H）
-Output D2H: <ms> ms, <bytes> bytes, <KiB> KiB
-All time end to end: <ms> ms (input H2D+preprocess compute+inference+postprocess compute+output D2H)
-FPS: <fps>
-Output path: ../output/output_rgb_seg.jpg
+YOLOv11-SEG PERFORMANCE REPORT
+End-to-end FPS           : <fps> FPS
+OpenRT inference FPS     : <fps> FPS
+End-to-end latency       : <ms> ms / frame
+Instances (last frame)   : <count>
+Input H2D transfer       : <ms> ms  (<KiB> KiB)
+Preprocess               : <ms> ms
+OpenRT inference         : <ms> ms
+Postprocess              : <ms> ms
+Output D2H transfer      : <ms> ms  (<KiB> KiB)
+Visualization            : ../output/output_rgb_seg.jpg
+[SUCCESS ] Inference completed successfully.
 ```
 
-`Preprocess compute` 不含输入 H2D，`Postprocess compute` 不含输出 D2H。`All time end to end` 为五个互斥阶段之和，并用于计算 FPS。
+`Input H2D transfer` 和 `Output D2H transfer` 单独打印。
 
 绘制后的图片默认保存到 `build/output/output_rgb_seg.jpg`。
 

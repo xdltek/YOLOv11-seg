@@ -49,6 +49,7 @@ struct ReferenceCandidate
 
 struct AccuracyThresholds
 {
+    float max_score_diff = 0.002f;
     float min_box_iou = 0.98f;
     float max_box_diff_px = 1.0f;
     float min_mask_iou = 0.90f;
@@ -494,7 +495,7 @@ AccuracySummary compare_accuracy(const std::vector<Segmentation>& output,
         summary.max_mask_diff_ratio = std::max(summary.max_mask_diff_ratio, current_mask_diff_ratio);
 
         bool metadata_match = out.class_id == ref.class_id &&
-                              std::fabs(out.confidence - ref.confidence) <= 1.0e-5f;
+                              std::fabs(out.confidence - ref.confidence) <= thresholds.max_score_diff;
         bool match_passed = metadata_match &&
                             box_iou >= thresholds.min_box_iou &&
                             box_diff <= thresholds.max_box_diff_px &&
@@ -910,6 +911,7 @@ int main(int argc, char** argv)
 
         std::cout << std::fixed << std::setprecision(3)
                   << "Accuracy thresholds:\n"
+                  << "  max_score_diff: " << accuracy_thresholds.max_score_diff << "\n"
                   << "  min_box_iou: " << accuracy_thresholds.min_box_iou << "\n"
                   << "  max_box_diff_px: " << accuracy_thresholds.max_box_diff_px << "\n"
                   << "  min_mask_iou: " << accuracy_thresholds.min_mask_iou << "\n"

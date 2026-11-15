@@ -191,7 +191,7 @@ set_target_properties(yolov11_seg_yuv_frame_demo PROPERTIES
 )
 
 add_executable(yolov11_seg_postprocess_test
-    ${ROOT_DIRECTORY}/demos/postprocess_test/main.cpp
+    ${ROOT_DIRECTORY}/tests/postprocess_test.cpp
 )
 target_include_directories(yolov11_seg_postprocess_test PRIVATE
     ${ThirdPartyLib_Include}

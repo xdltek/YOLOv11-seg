@@ -301,8 +301,10 @@ bool YoloV11SegPipeline::runInput(const void* data,
                                 &preprocess_profile)) {
             return false;
         }
-        // V7 keeps PRE SRAM persistent. Sparse POST buffers coexist within current SRAM capacity,
-        // avoiding per-frame rtFreeSram/rtMallocSram churn.
+        // The normalized tensor has already been copied to the inference DDR binding.
+        // Release PRE SRAM before inference/POST so 960x960 and 1280x1024 models
+        // have enough SRAM for their larger prototype and sparse-mask workspaces.
+        preprocessor_->releaseSramBuffers();
     }
     auto preprocess_stop = std::chrono::high_resolution_clock::now();
     const double preprocess_total_ms = preprocess_profile.total_ms > 0.0 ?
@@ -340,6 +342,10 @@ bool YoloV11SegPipeline::runInput(const void* data,
                                  &postprocess_profile)) {
             return false;
         }
+        // Release transient POST SRAM before the next frame's PRE allocation.
+        // This is required when large model-input and prototype tensors cannot
+        // coexist in the fixed SRAM capacity.
+        postprocessor_->releaseSramBuffers();
     }
     auto postprocess_stop = std::chrono::high_resolution_clock::now();
     const double postprocess_total_ms = postprocess_profile.total_ms > 0.0 ?

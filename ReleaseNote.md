@@ -1,87 +1,92 @@
 # Release Notes
 
-## CPU_NMS Complete Version
+## Unreleased
 
-This version completes the optimized CPU_NMS pipeline:
+- Standardized the build, run, benchmark, CLI, console banner, and model-package behavior.
+- Added persistent OpenRT engine caching. The first execution builds and stores an engine; later executions deserialize it directly.
+- Added model-content/OpenRT-version cache identity, engine checksum validation, and automatic ONNX rebuild for corrupted or incompatible caches.
+- Added structured application output: stage banners, warmup/benchmark messages, progress bar, dual FPS highlights, pipeline breakdown, result section, and success status.
 
-- RPP decodes and thresholds fixed candidate slots; CPU performs compact, sort, and greedy NMS.
-- Selected mask coefficients remain on the RPP path and are gathered by anchor index.
-- Sparse Prototype ROI replaces full `160×160` per-instance mask generation.
-- Packed uint8 ROI masks use direct SRAM-to-pinned-Host return.
-- RGB and I420 inputs share persistent pipeline resources and a common runtime stream.
-- Failed GEMM/BF16 experiments and their `rppblas` dependency are not part of the release path.
+## YOLOv11-SEG RPP Inference Demo V2.0
 
-Validation completed with a full project build, synthetic postprocess accuracy regression, and RGB/I420 end-to-end runs on RPP. RT_NMS and full graph integration are deferred to the next version.
+This release provides a standardized, standalone YOLOv11-SEG project structure and an end-to-end RPP segmentation path.
 
----
+### Validated Models
 
-## CPU_NMS完成版
+| Model | Input | End-to-end | FPS | Status |
+| --- | --- | ---: | ---: | --- |
+| YOLO11n-seg | 640×640 | 18.122 ms | 55.182 | PASS |
+| YOLO11s-seg | 640×640 | 23.203 ms | 43.098 | PASS |
+| YOLO11m-seg | 640×640 | 36.187 ms | 27.634 | PASS |
+| YOLO11l-seg | 640×640 | 40.876 ms | 24.464 | PASS |
+| YOLO11x-seg | 640×640 | 68.120 ms | 14.680 | PASS |
+| YOLO11n-seg | 960×960 | 42.387 ms | 23.592 | PASS |
+| YOLO11s-seg | 960×960 | 45.463 ms | 21.996 | PASS |
+| YOLO11n-seg | 1024×1280 | 46.386 ms | 21.558 | PASS |
 
-本版本完成优化后的CPU_NMS执行链：
+Each model passed ONNX checking, OpenRT/RPP engine construction, one warmup plus 10 measured RGB loops, an I420 smoke test, and rendered-output validation. Performance describes the current local RPP environment.
 
-- RPP生成并过滤候选槽，CPU执行compact、排序和greedy NMS。
-- selected mask coefficient按anchor index在RPP侧完成gather。
-- 使用Sparse Prototype ROI替代每实例完整`160×160` mask计算。
-- packed uint8 ROI mask直接从SRAM回传pinned Host。
-- RGB和I420输入复用持久化pipeline资源及统一Runtime stream。
-- 已失败的GEMM/BF16实验和`rppblas`依赖不进入正式版本。
+### Added
 
-已完成完整工程构建、synthetic后处理精度回归，以及RGB/I420端到端RPP运行验证。RT_NMS和全流程图内集成留待下一版本。
+- Multi-output YOLOv11 segmentation inference support.
+- RPP RT NMS with selected-anchor mask coefficient handling.
+- Sparse prototype ROI combination, bilinear resize, threshold, and packed uint8 mask output on RPP.
+- RGB/BGR image and I420 YUV frame demos.
+- Standalone postprocess accuracy and performance test under `tests/`.
+- Supported-model and measured-performance tables in the root README.
 
----
+### Changed
 
-## YOLOv11-SEG RPP Det Demo Initialization
+- Standardized root README sections, bilingual presentation, repository navigation, and performance format.
+- Moved `AI_Log.md` to the repository root.
+- Restricted `demos/` to the two customer-facing application entries.
+- Added explicit PRE/POST transient SRAM lifetime boundaries for supported large static models.
+- Standardized the default model as `weights/yolo11s-seg_640x640_sim.onnx` across scripts and binaries.
 
-This release initializes the YOLOv11-SEG RPP det demo repository.
+### Removed
 
-### What Was Added
-
-- Added a complete YOLOv11-SEG object detection demo for RPP hardware.
-- Added RGB image and I420 YUV frame demo entry points.
-- Added default build, run, test, and benchmark scripts under `scripts/`.
-- Added sample assets under `assets/` for quick local validation.
-- Added default output, log, and trace directory handling through the build and run scripts.
-- Added public README documentation for building, running, benchmarking, and adapting the demo.
-- Added model directory preparation through `weights/`, while keeping local model files out of Git.
-
-### User Workflow
-
-- Build the demo with `scripts/build.sh`.
-- Run the default demos with `scripts/run.sh`.
-- Run a smoke check with `scripts/test.sh`.
-- Run benchmark loops with `scripts/benchmark.sh`.
-
-### Notes
-
-- The default model path is `weights/yolo11s-seg.onnx`.
-- If the default model is missing, place `yolo11s-seg.onnx` in the repository root or under `weights/`.
-- Generated build outputs, logs, traces, and model files are intentionally ignored by Git.
+- Removed the unused legacy `yolov11_nms_pre` plugin directory.
+- Removed unsupported-model details from customer-facing README and release tables.
 
 ---
 
-## YOLOv11-SEG RPP Det Demo 初始化
+## YOLOv11-SEG RPP 推理 Demo V2.0
 
-本次发布用于初始化 YOLOv11-SEG RPP det demo 仓库。
+本版本提供标准化、独立的 YOLOv11-SEG 工程结构和端到端 RPP 实例分割执行链。
 
-### 做了什么
+### 已验证模型
 
-- 新增完整的 YOLOv11-SEG 目标检测 demo，用于 RPP 硬件运行。
-- 新增 RGB 图片和 I420 YUV 帧两类 demo 入口。
-- 新增 `scripts/` 下的默认构建、运行、测试和 benchmark 脚本。
-- 新增 `assets/` 示例资源，便于快速本地验证。
-- 新增默认输出、日志和 trace 目录处理，随构建和运行脚本自动使用。
-- 新增公开 README 文档，覆盖构建、运行、benchmark 和 demo 适配方式。
-- 新增 `weights/` 模型目录准备，同时保持本地模型文件不进入 Git。
+| 模型 | 输入 | 端到端 | FPS | 状态 |
+| --- | --- | ---: | ---: | --- |
+| YOLO11n-seg | 640×640 | 18.122 ms | 55.182 | PASS |
+| YOLO11s-seg | 640×640 | 23.203 ms | 43.098 | PASS |
+| YOLO11m-seg | 640×640 | 36.187 ms | 27.634 | PASS |
+| YOLO11l-seg | 640×640 | 40.876 ms | 24.464 | PASS |
+| YOLO11x-seg | 640×640 | 68.120 ms | 14.680 | PASS |
+| YOLO11n-seg | 960×960 | 42.387 ms | 23.592 | PASS |
+| YOLO11s-seg | 960×960 | 45.463 ms | 21.996 | PASS |
+| YOLO11n-seg | 1024×1280 | 46.386 ms | 21.558 | PASS |
 
-### 用户流程
+所有模型均通过 ONNX 检查、OpenRT/RPP engine 构建、一次 warmup 加 10 次 RGB 测量、I420 smoke test 和渲染结果检查。性能仅代表当前本地 RPP 环境。
 
-- 使用 `scripts/build.sh` 构建 demo。
-- 使用 `scripts/run.sh` 运行默认 demo。
-- 使用 `scripts/test.sh` 进行基础检查。
-- 使用 `scripts/benchmark.sh` 运行 benchmark loop。
+### 新增
 
-### 说明
+- YOLOv11 双输出 segmentation inference。
+- RPP RT NMS 和 selected-anchor mask coefficient 处理。
+- RPP Sparse Prototype ROI combine、双线性 resize、threshold 和 packed uint8 mask 输出。
+- RGB/BGR 图片和 I420 YUV 帧 Demo。
+- `tests/` 下的独立后处理精度与性能测试。
+- 根 README 中的支持模型和实测性能表。
 
-- 默认模型路径为 `weights/yolo11s-seg.onnx`。
-- 如果默认模型不存在，可将 `yolo11s-seg.onnx` 放在仓库根目录或 `weights/` 下。
-- 构建产物、日志、trace 和模型文件会被 Git 忽略。
+### 变更
+
+- 统一根 README 章节、中英双语、仓库导航和性能表格式。
+- `AI_Log.md` 移到仓库根目录。
+- `demos/` 仅保留两个用户应用入口。
+- 为已支持的大尺寸静态模型增加明确的 PRE/POST transient SRAM 生命周期。
+- 脚本和二进制默认模型统一为 `weights/yolo11s-seg_640x640_sim.onnx`。
+
+### 移除
+
+- 删除未使用的旧 `yolov11_nms_pre` plugin 目录。
+- 从对外 README 和 Release 表格移除不支持模型的说明。
