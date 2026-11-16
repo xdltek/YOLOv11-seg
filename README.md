@@ -44,7 +44,6 @@ Successful execution prints stage progress, end-to-end and OpenRT FPS, pipeline 
 |---|---|
 | `scripts/build.sh` | Cleans generated outputs, configures CMake, and builds without preparing a model. |
 | `scripts/run.sh` | Runs both demos, or one selected workload with configurable paths and loops. |
-| `scripts/test.sh` | Checks the selected model, executables, and sample inputs. |
 | `scripts/benchmark.sh` | Runs repeated measurements and archives the console log. |
 
 ```shell
@@ -75,7 +74,7 @@ yolov11-seg/
 │   ├── inference/            # multi-output OpenRT and engine cache
 │   ├── preprocess/           # upload, letterbox, color, normalize
 │   └── postprocess/          # RT NMS and sparse mask reconstruction
-├── scripts/                  # build, run, test, benchmark
+├── scripts/                  # build, run, benchmark
 ├── src/
 │   ├── perf/                 # optional rpp_perf integration
 │   ├── utils/                # logging, parser and path helpers
@@ -91,7 +90,7 @@ yolov11-seg/
 | [`rpp/`](rpp/README.md) | Hardware-facing inference, preprocessing, and postprocessing. |
 | `demos/` | RGB and I420 customer application entries. |
 | [`docs/`](docs/README.md) | Public documentation and API navigation. |
-| `scripts/` | Reproducible build, run, test, and benchmark commands. |
+| `scripts/` | Reproducible build, run, and benchmark commands. |
 | `weights/` | Empty release placeholder for user-provided models. |
 
 ## Demo Guides
@@ -379,7 +378,6 @@ scripts/run.sh --model /path/to/yolo11-seg.onnx
 |---|---|
 | `scripts/build.sh` | 清理生成物、配置 CMake 并构建，不处理模型。 |
 | `scripts/run.sh` | 运行两个 Demo，或选择 workload、输入输出和循环次数。 |
-| `scripts/test.sh` | 检查模型、程序和样例输入。 |
 | `scripts/benchmark.sh` | 多次测量并归档控制台日志。 |
 
 ## 仓库结构
@@ -402,7 +400,7 @@ yolov11-seg/
 │   ├── inference/            # 双输出推理与 engine 缓存
 │   ├── preprocess/           # 上传、letterbox、颜色、归一化
 │   └── postprocess/          # RT NMS 与稀疏 mask
-├── scripts/                  # build、run、test、benchmark
+├── scripts/                  # build、run、benchmark
 ├── src/
 │   ├── perf/                 # 可选 trace
 │   ├── utils/                # 通用工具
