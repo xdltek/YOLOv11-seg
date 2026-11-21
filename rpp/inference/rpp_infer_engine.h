@@ -116,12 +116,11 @@ private:
 
     std::string input_name_;
     std::string output_name_;
-    std::string distances_name_;
+    std::string dfl_logits_name_;
     std::string prediction_name_;
-    void* distances_sram_ = nullptr;
+    void* dfl_logits_sram_ = nullptr;
     void* boxes_sram_ = nullptr;
     int box_anchors_ = 0;
-    bool device_dfl_ = false;
     std::vector<RppInferOutputInfo> output_infos_;
     infer1::Dims output_dimensions_;
     infer1::DataType input_data_type_ {infer1::DataType::kFLOAT};

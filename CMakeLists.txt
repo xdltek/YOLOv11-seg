@@ -158,6 +158,8 @@ target_link_libraries(yolov11_box_decode_test PRIVATE rpp_inference)
 set_target_properties(yolov11_box_decode_test PROPERTIES BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}")
 
 add_executable(yolov11_model_support_test EXCLUDE_FROM_ALL ${ROOT_DIRECTORY}/tests/test_model_support.cpp)
+add_executable(yolov11_mask_geometry_test EXCLUDE_FROM_ALL ${ROOT_DIRECTORY}/tests/test_mask_geometry.cpp)
+target_include_directories(yolov11_mask_geometry_test PRIVATE ${ROOT_DIRECTORY}/rpp/postprocess)
 target_include_directories(yolov11_model_support_test PRIVATE ${RPP_INFERENCE_INCLUDE_DIR})
 
 add_library(rpp_yolov11_seg_postprocess SHARED

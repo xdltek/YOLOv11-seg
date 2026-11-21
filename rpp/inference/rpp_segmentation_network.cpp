@@ -48,9 +48,11 @@ std::string deviceDfl(infer1::INetworkDefinition& network, int anchors)
         for (int j = 0; j < layer->getNbOutputs(); ++j) {
             auto* t = layer->getOutput(j);
             const auto s = t->getDimensions();
-            const std::string name = t->getName() ? t->getName() : "";
-            if (name.find("/dfl/Reshape_output_0") != std::string::npos &&
-                s.nbDims == 3 && s.d[0] == 4 && s.d[1] == 16 && s.d[2] == anchors) logits = t;
+            if (layer->getType() == LayerType::kSHUFFLE &&
+                s.nbDims == 3 && s.d[0] == 4 && s.d[1] == 16 && s.d[2] == anchors) {
+                if (logits) throw std::runtime_error("Ambiguous DFL logits layout");
+                logits = t;
+            }
         }
     }
     for (int i = 0; i < network.getNbOutputs(); ++i) {
@@ -149,9 +151,8 @@ void streamAttention(infer1::INetworkDefinition& network, std::vector<std::vecto
     for(int i=0;i<original_count;++i) {
         auto* soft=network.getLayer(i);
         if(soft->getType()!=LayerType::kSOFTMAX || soft->getNbOutputs()!=1) continue;
-        const std::string name=soft->getOutput(0)->getName()?soft->getOutput(0)->getName():"";
-        if(name.find("/attn/Softmax_output_0")==std::string::npos) continue;
         auto* qk=producer(soft->getInput(0));
+        if (!qk || qk->getType() != LayerType::kMATRIX_MULTIPLY) continue;
         ILayer *transpose=nullptr,*context=nullptr;
         for(int j=0;j<original_count;++j) {
             auto* candidate=network.getLayer(j);
@@ -159,36 +160,41 @@ void streamAttention(infer1::INetworkDefinition& network, std::vector<std::vecto
         }
         if(transpose) for(int j=0;j<original_count;++j) {
             auto* candidate=network.getLayer(j);
-            if(candidate->getNbInputs()==2 && candidate->getInput(1)==transpose->getOutput(0)) context=candidate;
+            if(candidate->getType()==LayerType::kMATRIX_MULTIPLY && candidate->getNbInputs()==2 &&
+               candidate->getInput(1)==transpose->getOutput(0)) context=candidate;
         }
         if(!qk || qk->getNbInputs()!=2 || !context) throw std::runtime_error("Unexpected attention graph contract");
         auto *q=qk->getInput(0),*k=qk->getInput(1),*v=context->getInput(0);
         const auto qs=q->getDimensions(),ks=k->getDimensions(),vs=v->getDimensions();
-        // The tiled form is qualified for four-head 960 exports. Preserve the
-        // native parser path for other head counts, including native n960.
-        if(qs.nbDims==3 && qs.d[0]!=4) continue;
-        if(qs.nbDims!=3 || ks.nbDims!=3 || vs.nbDims!=3 || qs.d[1]!=900 || qs.d[2]!=32 ||
-            ks.d[0]!=qs.d[0] || ks.d[1]!=32 || ks.d[2]!=900 || vs.d[0]!=qs.d[0] || vs.d[1]!=64 || vs.d[2]!=900)
-            throw std::runtime_error("Unsupported 960-square attention dimensions");
-        constexpr int length=900,padded=928,queries=960,tile=96;
+        if (qs.nbDims != 3 || ks.nbDims != 3 || vs.nbDims != 3 ||
+            qs.d[0] <= 0 || qs.d[1] <= 0 || qs.d[2] <= 0 ||
+            ks.d[0] != qs.d[0] || ks.d[1] != qs.d[2] || ks.d[2] != qs.d[1] ||
+            vs.d[0] != qs.d[0] || vs.d[1] <= 0 || vs.d[2] != qs.d[1])
+            throw std::runtime_error("Unsupported static attention dimensions");
+        const int length = qs.d[1];
+        const int key_channels = qs.d[2];
+        const int value_channels = vs.d[1];
+        constexpr int tile = 96;
+        const int padded = ((length + 31) / 32) * 32;
+        const int queries = ((length + tile - 1) / tile) * tile;
         weights.emplace_back(padded,0.0f);
         for(int j=length;j<padded;++j) weights.back()[j]=-10000.0f;
         const float* key_mask=weights.back().data();
         std::vector<ITensor*> heads;
         for(int h=0;h<qs.d[0];++h) {
-            auto* qh=reshape(slice(q,dims({h,0,0}),dims({1,length,32})),dims({length,32}));
-            auto* kh=reshape(slice(k,dims({h,0,0}),dims({1,32,length})),dims({32,length}));
-            auto* vh=reshape(slice(v,dims({h,0,0}),dims({1,64,length})),dims({64,length}));
-            qh=pad(qh,length,32,queries-length,0);
-            kh=pad(kh,32,length,0,padded-length);
-            vh=pad(vh,64,length,0,padded-length);
+            auto* qh=reshape(slice(q,dims({h,0,0}),dims({1,length,key_channels})),dims({length,key_channels}));
+            auto* kh=reshape(slice(k,dims({h,0,0}),dims({1,key_channels,length})),dims({key_channels,length}));
+            auto* vh=reshape(slice(v,dims({h,0,0}),dims({1,value_channels,length})),dims({value_channels,length}));
+            qh=pad(qh,length,key_channels,queries-length,0);
+            kh=pad(kh,key_channels,length,0,padded-length);
+            vh=pad(vh,value_channels,length,0,padded-length);
             std::vector<ITensor*> chunks;
             for(int start=0;start<queries;start+=tile) {
                 // The current scheduler expects a constant node to have a
                 // single consumer. Reuse its immutable payload, not its node.
                 auto* mask=network.addConstant(dims({1,padded}),Weights{DataType::kFLOAT,key_mask,padded});
                 if(!mask) throw std::runtime_error("Cannot create attention key mask");
-                auto* query=slice(qh,dims({start,0}),dims({tile,32}));
+                auto* query=slice(qh,dims({start,0}),dims({tile,key_channels}));
                 auto* scores=network.addMatrixMultiply(*query,MatrixOperation::kNONE,*kh,MatrixOperation::kNONE);
                 if(!scores) throw std::runtime_error("Cannot project attention query tile");
                 auto* masked=network.addElementWise(*scores->getOutput(0),*mask->getOutput(0),ElementWiseOperation::kSUM);
@@ -204,7 +210,7 @@ void streamAttention(infer1::INetworkDefinition& network, std::vector<std::vecto
                 chunks.push_back(result->getOutput(0));
             }
             auto* joined=concat(chunks,1);
-            heads.push_back(reshape(slice(joined,dims({0,0}),dims({64,length})),dims({1,64,length})));
+            heads.push_back(reshape(slice(joined,dims({0,0}),dims({value_channels,length})),dims({1,value_channels,length})));
         }
         auto* result=concat(heads,0);
         replaceConsumers(network,*context->getOutput(0),*result);
@@ -244,36 +250,12 @@ std::string adaptSegmentationNetwork(infer1::INetworkDefinition& network,
 {
     using namespace infer1;
     const auto input_shape = network.getInput(0)->getDimensions();
-    const bool device_dfl = input_shape.nbDims >= 2 &&
-        input_shape.d[input_shape.nbDims - 2] == 960 && input_shape.d[input_shape.nbDims - 1] == 960;
-    if (device_dfl) streamAttention(network, weights);
+    streamAttention(network, weights);
     const int count = network.getNbLayers();
     for (int i = 0; i < count; ++i) {
         auto* layer = network.getLayer(i);
-        // Some parser importers do not set the layer name. ONNX tensor names
-        // still identify DFL normalization and the prototype upsample.
-        std::string name = layer->getName() ? layer->getName() : "";
-        if (layer->getNbOutputs() && layer->getOutput(0)->getName())
-            name += layer->getOutput(0)->getName();
-        if (!device_dfl && layer->getType() == LayerType::kSOFTMAX && name.find("dfl") != std::string::npos) {
-            const auto shape = layer->getInput(0)->getDimensions();
-            int axis = -1;
-            for (int d = 0; d < shape.nbDims; ++d) if (shape.d[d] == 16) { axis = d; break; }
-            if (axis < 0) throw std::runtime_error("Unexpected DFL channel dimension");
-            auto* exp = network.addUnary(*layer->getInput(0), UnaryOperation::kEXP);
-            if (!exp) throw std::runtime_error("Cannot create DFL exponential");
-            auto* sum = network.addReduce(*exp->getOutput(0), ReduceOperation::kSUM, 1u << axis, true);
-            if (!sum) throw std::runtime_error("Cannot create DFL channel sum");
-            auto* div = network.addElementWise(*exp->getOutput(0), *sum->getOutput(0), ElementWiseOperation::kDIV);
-            if (!div) throw std::runtime_error("Cannot create DFL normalization");
-            exp->setName((name + "_rpp_exp").c_str());
-            sum->setName((name + "_rpp_sum").c_str());
-            div->setName((name + "_rpp_div").c_str());
-            replaceConsumers(network, *layer->getOutput(0), *div->getOutput(0));
-            std::cout << "[ENGINE  ] Adapted DFL channel normalization in memory" << std::endl;
-        }
-        if (layer->getType() != LayerType::kDECONVOLUTION || name.find("proto") == std::string::npos)
-            continue;
+        if (layer->getType() != LayerType::kDECONVOLUTION) continue;
+        const std::string name = "segmentation_prototype_upsample";
         auto* transpose = static_cast<IDeconvolutionLayer*>(layer);
         const auto shape = layer->getInput(0)->getDimensions();
         const auto kernel = transpose->getKernelSize();
@@ -319,27 +301,12 @@ std::string adaptSegmentationNetwork(infer1::INetworkDefinition& network,
         replaceConsumers(network, *layer->getOutput(0), *output->getOutput(0));
         std::cout << "[ENGINE  ] Adapted prototype upsample in memory" << std::endl;
     }
-    // Keep the four DFL distances on device for FP32 anchor/stride arithmetic.
-    // Public prediction/prototype outputs retain their original contract.
-    // The 960-square path decodes logits directly, avoiding the SDK's large
-    // DFL transpose/reduction. The existing 640-square distance path is kept.
-    if (device_dfl) return deviceDfl(network, 18900);
-    if (input_shape.nbDims < 2) return {};
+    // One head contract for every release profile: raw FP32 [4,16,N]
+    // plus public prediction/prototype. Runtime dimensions determine N.
     const int height = input_shape.d[input_shape.nbDims - 2];
     const int width = input_shape.d[input_shape.nbDims - 1];
-    if (!((width == 640 && height == 640) || (width == 960 && height == 960))) return {};
-    const int anchors = width * height / 64 + width * height / 256 + width * height / 1024;
-    for (int i = 0; i < network.getNbLayers(); ++i) {
-        auto* layer = network.getLayer(i);
-        for (int j = 0; j < layer->getNbOutputs(); ++j) {
-            auto* tensor = layer->getOutput(j);
-            const std::string name = tensor->getName() ? tensor->getName() : "";
-            const auto shape = tensor->getDimensions();
-            if (name.find("/dfl/") != std::string::npos && shape.nbDims == 2 && shape.d[0] == 4 && shape.d[1] == anchors) {
-                network.markOutput(*tensor);
-                return name;
-            }
-        }
-    }
-    return {};
+    const int anchors = (width / 8) * (height / 8) +
+                        (width / 16) * (height / 16) +
+                        (width / 32) * (height / 32);
+    return deviceDfl(network, anchors);
 }

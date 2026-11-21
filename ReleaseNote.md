@@ -21,6 +21,16 @@ following model profiles, for RGB/BGR images and I420 frames.
 
 ### Changes
 
+- All seven profiles now share shape-driven attention adaptation and a single FP32
+  DFL/box decoder. Graph matching uses connectivity/shapes rather than exported names.
+- One RT NMS graph, anchor-map parser and sparse-mask implementation serve all profiles.
+  A single SDK input policy retains direct 8400-anchor input and compact 18900-anchor input;
+  forcing compaction for every profile reproduced l640 missing a weak object.
+- Merged duplicated interpolation taps into three taps per axis. Removed unused CPU
+  NMS/mask helpers, obsolete CUDA kernels and the dense-mask environment switch.
+- Accuracy tooling now validates the unchanged source ONNX through the application;
+  offline graph-rewrite alternatives have been removed. Added a serial paired-audit tool.
+
 - Retained the preprocessing, inference and postprocessing modules as independent
   OpenRT/RPP stages, with the existing console reports and output visualization.
 - Builds a fresh in-memory engine from the original ONNX in every process;
@@ -39,44 +49,49 @@ following model profiles, for RGB/BGR images and I420 frames.
 
 | Model profile | Input | Preprocess | Inference | Postprocess | End-to-end | FPS | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.875 ms | 7.109 ms | 41.581 ms | 56.565 ms | 17.679 | PASS |
-| YOLO11s-seg | 640×640 | 7.737 ms | 22.997 ms | 42.443 ms | 73.177 ms | 13.665 | PASS |
-| YOLO11m-seg | 640×640 | 7.871 ms | 44.528 ms | 42.782 ms | 95.181 ms | 10.506 | PASS |
-| YOLO11l-seg | 640×640 | 7.717 ms | 49.193 ms | 41.177 ms | 98.087 ms | 10.195 | PASS |
-| YOLO11x-seg | 640×640 | 7.795 ms | 120.255 ms | 40.465 ms | 168.516 ms | 5.934 | PASS |
-| YOLO11n-seg | 960×960 | 10.734 ms | 28.990 ms | 54.607 ms | 94.330 ms | 10.601 | PASS |
-| YOLO11s-seg | 960×960 | 10.668 ms | 44.781 ms | 56.132 ms | 111.581 ms | 8.962 | PASS |
+| YOLO11n-seg | 640×640 | 7.697 ms | 11.110 ms | 28.775 ms | 47.583 ms | 21.016 | PASS |
+| YOLO11s-seg | 640×640 | 7.713 ms | 26.578 ms | 29.622 ms | 63.913 ms | 15.646 | PASS |
+| YOLO11m-seg | 640×640 | 7.581 ms | 47.658 ms | 29.243 ms | 84.482 ms | 11.837 | PASS |
+| YOLO11l-seg | 640×640 | 7.746 ms | 52.741 ms | 28.502 ms | 88.988 ms | 11.237 | PASS |
+| YOLO11x-seg | 640×640 | 7.662 ms | 124.878 ms | 28.331 ms | 160.872 ms | 6.216 | PASS |
+| YOLO11n-seg | 960×960 | 10.672 ms | 28.248 ms | 42.491 ms | 81.411 ms | 12.283 | PASS |
+| YOLO11s-seg | 960×960 | 10.791 ms | 44.532 ms | 43.120 ms | 98.442 ms | 10.158 | PASS |
 
 ### Measured I420 Performance (2026-11-21)
 
 | Model profile | Input | Preprocess | Inference | Postprocess | End-to-end | FPS | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.189 ms | 7.329 ms | 22.579 ms | 37.096 ms | 26.957 | PASS |
-| YOLO11s-seg | 640×640 | 7.262 ms | 22.701 ms | 22.839 ms | 52.803 ms | 18.938 | PASS |
-| YOLO11m-seg | 640×640 | 7.229 ms | 43.981 ms | 22.732 ms | 73.941 ms | 13.524 | PASS |
-| YOLO11l-seg | 640×640 | 7.179 ms | 48.249 ms | 22.400 ms | 77.828 ms | 12.849 | PASS |
-| YOLO11x-seg | 640×640 | 7.434 ms | 120.362 ms | 22.916 ms | 150.712 ms | 6.635 | PASS |
-| YOLO11n-seg | 960×960 | 10.467 ms | 29.064 ms | 36.084 ms | 75.615 ms | 13.225 | PASS |
-| YOLO11s-seg | 960×960 | 10.493 ms | 44.733 ms | 35.984 ms | 91.210 ms | 10.964 | PASS |
+| YOLO11n-seg | 640×640 | 6.982 ms | 11.298 ms | 16.084 ms | 34.363 ms | 29.101 | PASS |
+| YOLO11s-seg | 640×640 | 7.122 ms | 26.013 ms | 16.672 ms | 49.807 ms | 20.077 | PASS |
+| YOLO11m-seg | 640×640 | 6.986 ms | 47.831 ms | 16.548 ms | 71.366 ms | 14.012 | PASS |
+| YOLO11l-seg | 640×640 | 7.041 ms | 52.464 ms | 16.342 ms | 75.847 ms | 13.184 | PASS |
+| YOLO11x-seg | 640×640 | 7.048 ms | 125.098 ms | 16.338 ms | 148.485 ms | 6.735 | PASS |
+| YOLO11n-seg | 960×960 | 10.238 ms | 28.069 ms | 29.133 ms | 67.439 ms | 14.828 | PASS |
+| YOLO11s-seg | 960×960 | 10.283 ms | 44.100 ms | 29.264 ms | 83.648 ms | 11.955 | PASS |
 
-All seven profiles use the consolidated source and original ONNX models, measured serially after a power cycle.
-Each input uses one warmup and ten measured frames, capture disabled, at a 920 MHz RPP clock.
-PRE includes input H2D; POST includes output D2H. Engine construction, image decoding and visualization
-are excluded. PASS in these tables denotes completed runtime/performance measurement.
+All seven profiles use the shared paths and original ONNX models, measured in paired runs
+against preserved `f47941a` binaries. Each input uses one warmup and ten measured frames,
+capture disabled, at a 920 MHz RPP clock; all device tasks run serially.
+PRE includes input H2D; POST includes output D2H. Engine construction, image decoding and
+visualization are excluded. PASS denotes completed runtime/performance measurement.
+All fourteen measured end-to-end latencies were below the paired `f47941a` baseline.
 
-The accuracy-corrected pipeline remains slower than the original 1.6.11 baseline; no speedup is claimed.
-The full-application one-H2D/one-D2H objective is still incomplete. Baseline, measurement details and
-commands: [performance record](docs/performance-baseline.md).
+These results remain slower than the original 1.6.11 target; the full-application one-H2D/one-D2H
+objective is still incomplete. Original target, paired comparisons and commands:
+[performance record](docs/performance-baseline.md).
 
 ### Validation Record
 
-On 2026-11-21, all seven profiles passed fresh RGB/I420 sample accuracy checks
-(28 captured full-pipeline frames) and performance runs (154 frames including
-warmup). Counts/classes matched ONNX Runtime, box IoU ≥ 0.90, mask IoU ≥ 0.95 and
-confidence difference ≤ 0.05; captured tensors were finite and repeatable.
-The device box/DFL, stable candidate-compaction and precision-module regressions
-also passed. No column/sequencer busy condition was reproduced during these runs.
+The shared implementation passed fresh RGB/I420 checks for all seven profiles
+(28 captured full-pipeline frames), and paired performance runs against `f47941a`
+(308 frames including warmup across both revisions). Counts/classes match CPU ONNX
+Runtime, box IoU ≥ 0.90, mask IoU ≥ 0.95 and score difference ≤ 0.05; raw outputs
+are finite and repeatable. All 14 paired latency checks passed.
+Device DFL, stable compaction, precision-module, host model-policy and merged
+interpolation regressions passed. No column/sequencer busy was reproduced.
 These are sample-level checks; see the [accuracy guide](docs/accuracy-validation.md).
+Additional n/m640 switching/replay checks passed 12 frames; a renamed n640 model
+passed two captured frames with identical weight payloads and new node/tensor names.
 
 ---
 
@@ -98,6 +113,13 @@ These are sample-level checks; see the [accuracy guide](docs/accuracy-validation
 
 ### 变更
 
+- 七个规格共用按形状驱动的 attention 适配及一个 FP32 DFL/框解码实现，图匹配依赖
+  连接关系和形状，不依赖导出名称。
+- 共用一个 RT NMS 图、anchor 映射解析及稀疏 mask 实现。仅保留一处 SDK 输入策略：
+  8400-anchor 直接输入、18900-anchor 稳定压缩；强制全部压缩会复现 l640 弱目标漏检。
+- 将重复插值采样合并为每轴三个 tap，删除未调用的 CPU NMS/mask、旧 CUDA kernel 和稠密 mask 开关。
+- 精度工具仅通过应用验证原始 ONNX，移除离线导图的多种替代模式，新增串行配对回归工具。
+
 - 保留前处理、推理、后处理独立的 OpenRT/RPP 模块、原有控制台报告及结果可视化。
 - 每个进程从原始 ONNX 新建内存 engine，关闭 engine 序列化、反序列化及 cache 加载。
 - 保留卷积 bias/舍入修正、设备 FP32 框解码、已支持的 attention 适配和 RT NMS 稳定候选压缩。
@@ -111,37 +133,39 @@ These are sample-level checks; see the [accuracy guide](docs/accuracy-validation
 
 | 模型 | 输入 | 前处理 | 推理 | 后处理 | 端到端 | FPS | 状态 |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.875 ms | 7.109 ms | 41.581 ms | 56.565 ms | 17.679 | PASS |
-| YOLO11s-seg | 640×640 | 7.737 ms | 22.997 ms | 42.443 ms | 73.177 ms | 13.665 | PASS |
-| YOLO11m-seg | 640×640 | 7.871 ms | 44.528 ms | 42.782 ms | 95.181 ms | 10.506 | PASS |
-| YOLO11l-seg | 640×640 | 7.717 ms | 49.193 ms | 41.177 ms | 98.087 ms | 10.195 | PASS |
-| YOLO11x-seg | 640×640 | 7.795 ms | 120.255 ms | 40.465 ms | 168.516 ms | 5.934 | PASS |
-| YOLO11n-seg | 960×960 | 10.734 ms | 28.990 ms | 54.607 ms | 94.330 ms | 10.601 | PASS |
-| YOLO11s-seg | 960×960 | 10.668 ms | 44.781 ms | 56.132 ms | 111.581 ms | 8.962 | PASS |
+| YOLO11n-seg | 640×640 | 7.697 ms | 11.110 ms | 28.775 ms | 47.583 ms | 21.016 | PASS |
+| YOLO11s-seg | 640×640 | 7.713 ms | 26.578 ms | 29.622 ms | 63.913 ms | 15.646 | PASS |
+| YOLO11m-seg | 640×640 | 7.581 ms | 47.658 ms | 29.243 ms | 84.482 ms | 11.837 | PASS |
+| YOLO11l-seg | 640×640 | 7.746 ms | 52.741 ms | 28.502 ms | 88.988 ms | 11.237 | PASS |
+| YOLO11x-seg | 640×640 | 7.662 ms | 124.878 ms | 28.331 ms | 160.872 ms | 6.216 | PASS |
+| YOLO11n-seg | 960×960 | 10.672 ms | 28.248 ms | 42.491 ms | 81.411 ms | 12.283 | PASS |
+| YOLO11s-seg | 960×960 | 10.791 ms | 44.532 ms | 43.120 ms | 98.442 ms | 10.158 | PASS |
 
 ### I420 实测性能（2026-11-21）
 
 | 模型 | 输入 | 前处理 | 推理 | 后处理 | 端到端 | FPS | 状态 |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.189 ms | 7.329 ms | 22.579 ms | 37.096 ms | 26.957 | PASS |
-| YOLO11s-seg | 640×640 | 7.262 ms | 22.701 ms | 22.839 ms | 52.803 ms | 18.938 | PASS |
-| YOLO11m-seg | 640×640 | 7.229 ms | 43.981 ms | 22.732 ms | 73.941 ms | 13.524 | PASS |
-| YOLO11l-seg | 640×640 | 7.179 ms | 48.249 ms | 22.400 ms | 77.828 ms | 12.849 | PASS |
-| YOLO11x-seg | 640×640 | 7.434 ms | 120.362 ms | 22.916 ms | 150.712 ms | 6.635 | PASS |
-| YOLO11n-seg | 960×960 | 10.467 ms | 29.064 ms | 36.084 ms | 75.615 ms | 13.225 | PASS |
-| YOLO11s-seg | 960×960 | 10.493 ms | 44.733 ms | 35.984 ms | 91.210 ms | 10.964 | PASS |
+| YOLO11n-seg | 640×640 | 6.982 ms | 11.298 ms | 16.084 ms | 34.363 ms | 29.101 | PASS |
+| YOLO11s-seg | 640×640 | 7.122 ms | 26.013 ms | 16.672 ms | 49.807 ms | 20.077 | PASS |
+| YOLO11m-seg | 640×640 | 6.986 ms | 47.831 ms | 16.548 ms | 71.366 ms | 14.012 | PASS |
+| YOLO11l-seg | 640×640 | 7.041 ms | 52.464 ms | 16.342 ms | 75.847 ms | 13.184 | PASS |
+| YOLO11x-seg | 640×640 | 7.048 ms | 125.098 ms | 16.338 ms | 148.485 ms | 6.735 | PASS |
+| YOLO11n-seg | 960×960 | 10.238 ms | 28.069 ms | 29.133 ms | 67.439 ms | 14.828 | PASS |
+| YOLO11s-seg | 960×960 | 10.283 ms | 44.100 ms | 29.264 ms | 83.648 ms | 11.955 | PASS |
 
-七个规格均使用当前收敛代码及原始 ONNX，在断电重启后串行实测。每个输入预热 1 帧、
-测量 10 帧，关闭精度采集，RPP 主频 920 MHz。前处理包含输入 H2D，后处理包含输出 D2H；
-不包含 engine 构建、图片读取和可视化。表中 PASS 表示该项运行与性能测量通过。
+七个规格均使用本次公共路径及原始 ONNX，与 `f47941a` 对照二进制逐项配对实测。
+每种输入预热 1 帧、测量 10 帧，关闭精度采集，RPP 主频 920 MHz；所有设备任务串行。
+前处理包含输入 H2D，后处理包含输出 D2H，不包含 engine 构建、图片读取和可视化。
+表中 PASS 表示运行与测量通过。相对 `f47941a`，十四项端到端实测均未出现回退。
 
-当前精度修复版仍慢于原 1.6.11 基准，不宣称性能提升；完整应用的一次 H2D/一次 D2H 目标尚未完成。
-原基准、逐阶段口径及复现命令见[性能记录](docs/performance-baseline.md)。
+当前结果仍慢于原 1.6.11 性能目标；完整应用的一次 H2D/一次 D2H 目标尚未完成。
+原始目标、配对对照及复现命令见[性能记录](docs/performance-baseline.md)。
 
 ### 验证记录
 
-2026-11-21，七个规格均通过新的 RGB/I420 样例精度检查（28 帧完整流水线采集）与
-性能测试（含预热共 154 帧）。目标数量、类别与 ONNX Runtime 一致，框 IoU ≥ 0.90、
-mask IoU ≥ 0.95、置信度差 ≤ 0.05，采集张量为有限值且重复一致。
-设备框/DFL 解码、稳定候选压缩及卷积精度模块回归亦通过；本轮运行未复现
-column/sequencer busy。样例检查不等于数据集 mAP 认证，详见[精度指南](docs/accuracy-validation.md)。
+公共实现通过七规格 RGB/I420 新精度检查（28 帧完整流水线采集），并与 `f47941a`
+逐项配对跑分（两版含预热共 308 帧）。目标数量、类别与 CPU ONNX Runtime 一致，
+框 IoU ≥ 0.90、mask IoU ≥ 0.95、置信度差 ≤ 0.05，原始输出有限且重复一致；十四项配对延迟检查通过。
+设备 DFL、稳定候选压缩、精度模块、主机规格策略及合并插值回归通过，未复现 column/sequencer busy。
+样例检查不代表数据集 mAP 认证，详见[精度指南](docs/accuracy-validation.md)。
+附加 n/m640 切图重放共十二帧通过，保持权重不变、替换节点及张量名称的 n640 模型两帧亦通过。

@@ -28,14 +28,9 @@ bool parseInputSpatialDims(const infer1::Dims& dims, int& width, int& height)
         return false;
     }
 
-    if (dims.nbDims >= 3 && dims.d[dims.nbDims - 1] == 3) {
-        height = dims.d[dims.nbDims - 3];
-        width = dims.d[dims.nbDims - 2];
-    }
-    else {
-        height = dims.d[dims.nbDims - 2];
-        width = dims.d[dims.nbDims - 1];
-    }
+    // The release contract is CHW/NCHW; spatial axes are always the last two.
+    height = dims.d[dims.nbDims - 2];
+    width = dims.d[dims.nbDims - 1];
 
     return width > 0 && height > 0;
 }
@@ -99,7 +94,7 @@ bool RppInferEngine::buildFromOnnx()
     std::vector<std::vector<float>> adapted_weights;
     try {
         validateSupportedSegmentationModel(*network);
-        distances_name_ = adaptSegmentationNetwork(*network, adapted_weights);
+        dfl_logits_name_ = adaptSegmentationNetwork(*network, adapted_weights);
     } catch (const std::exception& error) {
         std::cerr << "OpenRT segmentation adaptation failed: " << error.what() << std::endl;
         return false;
@@ -143,7 +138,7 @@ bool RppInferEngine::initializeBindings()
             }
         }
         else {
-            if (distances_name_ == engine_ptr_->getBindingName(i)) continue;
+            if (dfl_logits_name_ == engine_ptr_->getBindingName(i)) continue;
             RppInferOutputInfo output;
             output.name = engine_ptr_->getBindingName(i);
             output.dimensions = engine_ptr_->getBindingDimensions(i);
@@ -170,13 +165,12 @@ bool RppInferEngine::initializeBindings()
     // Create the execution context used by execute().
     context_ptr_.reset(engine_ptr_->createExecutionContext());
     if (!context_ptr_) return false;
-    if (!distances_name_.empty()) {
+    if (!dfl_logits_name_.empty()) {
         box_anchors_ = (input_width_ / 8) * (input_height_ / 8) +
                        (input_width_ / 16) * (input_height_ / 16) +
                        (input_width_ / 32) * (input_height_ / 32);
-        const size_t head_bytes = buffer_ptr_->size(distances_name_);
-        device_dfl_ = head_bytes == size_t(64) * box_anchors_ * sizeof(float);
-        if (!device_dfl_ && head_bytes != size_t(4) * box_anchors_ * sizeof(float))
+        const size_t head_bytes = buffer_ptr_->size(dfl_logits_name_);
+        if (head_bytes != size_t(64) * box_anchors_ * sizeof(float))
             return false;
         prediction_name_.clear();
         for (const auto& output : output_infos_)
@@ -195,34 +189,30 @@ RppInferEngine::~RppInferEngine()
 
 void RppInferEngine::releaseBoxBuffers()
 {
-    if (distances_sram_) rtFreeSram(distances_sram_);
-    if (boxes_sram_) rtFreeSram(boxes_sram_);
-    distances_sram_ = boxes_sram_ = nullptr;
+    if (dfl_logits_sram_) rtFreeSram(dfl_logits_sram_);
+    dfl_logits_sram_ = boxes_sram_ = nullptr;
 }
 
 bool RppInferEngine::decodeBoxes()
 {
-    if (distances_name_.empty()) return true;
+    if (dfl_logits_name_.empty()) return true;
     const size_t bytes = size_t(4) * box_anchors_ * sizeof(float);
-    const size_t input_bytes = device_dfl_ ? bytes * 16 : bytes;
+    const size_t input_bytes = bytes * 16;
     // OpenRT and the custom PRE/POST stages share SRAM. Allocate only after
     // synchronous inference and release before the next stage/frame; a custom
     // persistent allocation may otherwise overlap the SDK's execution workspace.
-    if (rtMallocSram(&distances_sram_, input_bytes) != rtSuccess ||
-        rtMallocSram(&boxes_sram_, bytes) != rtSuccess) {
+    if (rtMallocSram(&dfl_logits_sram_, input_bytes + bytes) != rtSuccess) {
         releaseBoxBuffers();
         return false;
     }
-    if (rtMemcpy(distances_sram_, buffer_ptr_->getDeviceBuffer(distances_name_), input_bytes,
+    boxes_sram_ = static_cast<unsigned char*>(dfl_logits_sram_) + input_bytes;
+    if (rtMemcpy(dfl_logits_sram_, buffer_ptr_->getDeviceBuffer(dfl_logits_name_), input_bytes,
                  rtMemcpyDeviceToSram) != rtSuccess) {
         releaseBoxBuffers();
         return false;
     }
-    if (device_dfl_) launch_yolo11_dfl_decode(nullptr, static_cast<const float*>(distances_sram_),
-                            static_cast<float*>(boxes_sram_), input_width_, input_height_, box_anchors_);
-    else launch_yolo11_box_decode(nullptr, static_cast<const float*>(distances_sram_),
-                            static_cast<float*>(boxes_sram_), input_width_, input_height_,
-                            box_anchors_);
+    launch_yolo11_dfl_decode(nullptr, static_cast<const float*>(dfl_logits_sram_),
+                             static_cast<float*>(boxes_sram_), input_width_, input_height_, box_anchors_);
     const bool passed = rtStreamSynchronize(nullptr) == rtSuccess &&
                         rtMemcpy(buffer_ptr_->getDeviceBuffer(prediction_name_), boxes_sram_, bytes,
                                  rtMemcpySramToDevice) == rtSuccess;
@@ -259,12 +249,12 @@ void* RppInferEngine::getOutputDeviceBuffer(size_t output_index) const
 
 void* RppInferEngine::getBoxHeadDeviceBuffer() const
 {
-    return buffer_ptr_ && !distances_name_.empty() ? buffer_ptr_->getDeviceBuffer(distances_name_) : nullptr;
+    return buffer_ptr_ && !dfl_logits_name_.empty() ? buffer_ptr_->getDeviceBuffer(dfl_logits_name_) : nullptr;
 }
 
 size_t RppInferEngine::getBoxHeadElements() const
 {
-    return buffer_ptr_ && !distances_name_.empty() ? buffer_ptr_->size(distances_name_) / sizeof(float) : 0;
+    return buffer_ptr_ && !dfl_logits_name_.empty() ? buffer_ptr_->size(dfl_logits_name_) / sizeof(float) : 0;
 }
 
 /**
@@ -280,9 +270,7 @@ bool RppInferEngine::executeContext()
 
     bool ok;
     {
-        yolo11::ScopedConvolutionPrecision precision(
-            (input_width_ == 640 && input_height_ == 640) ||
-            (input_width_ == 960 && input_height_ == 960));
+        yolo11::ScopedConvolutionPrecision precision(true);
         ok = context_ptr_->execute(1, buffer_ptr_->getDeviceBindings().data());
     }
     if (!ok) {

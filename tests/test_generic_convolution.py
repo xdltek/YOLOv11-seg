@@ -33,7 +33,7 @@ def main():
     np.ones((1, 3, 6, 66), np.float32).tofile(inputs)
     captures = args.output / "captures"
     subprocess.run([str(args.binary.resolve()), str(source.resolve()), str(inputs.resolve()),
-                    str(captures.resolve()), "--application"], check=True, timeout=180)
+                    str(captures.resolve()), "--precision-only"], check=True, timeout=180)
     # All operands are exact BF16. FP32 MAC is 48.375, bias -48 gives .375.
     # Rounding the accumulator before bias would give .25 or .5 instead.
     bindings = json.loads((captures / "bindings.json").read_text())

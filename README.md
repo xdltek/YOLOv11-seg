@@ -181,10 +181,17 @@ The application does not serialize engines or read/write local engine caches.
 Existing engine files are ignored. Construction is initialization time and is
 excluded from measured frame latency.
 
-Standard 640×640 exports are adapted in memory for DFL channel normalization and
-prototype upsampling. Convolution bias is accumulated in FP32 before nearest
-BF16 output rounding. No intermediate ONNX or modified SDK is required.
-The inference stage also includes FP32 box-coordinate correction on RPP.
+All seven profiles use one shape-driven attention adapter, one prototype-upsample
+adapter, and one RPP FP32 DFL/box decoder. Head count, token length, channels and
+anchor count come from the model graph. Convolution bias accumulates in FP32 before
+nearest BF16 rounding. No intermediate ONNX or modified SDK is required.
+
+The shared postprocessor uses one RT NMS graph and sparse-mask implementation.
+One SDK input compatibility policy remains: direct input for 8400 anchors, stable
+compaction for 18900 anchors. This policy preserves the validated object count;
+forcing compaction on every profile reproduced l640 missing a weak object.
+Customer integration and the exact common contract are explained in the
+[inference module guide](rpp/inference/README.md#shared-execution-contract).
 
 ## Code Execution Workflow
 
@@ -310,34 +317,36 @@ retained validation coverage and reproduction commands are documented in the
 
 | Model profile | Input | Preprocess | Inference | Postprocess | End-to-end | FPS | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.875 ms | 7.109 ms | 41.581 ms | 56.565 ms | 17.679 | PASS |
-| YOLO11s-seg | 640×640 | 7.737 ms | 22.997 ms | 42.443 ms | 73.177 ms | 13.665 | PASS |
-| YOLO11m-seg | 640×640 | 7.871 ms | 44.528 ms | 42.782 ms | 95.181 ms | 10.506 | PASS |
-| YOLO11l-seg | 640×640 | 7.717 ms | 49.193 ms | 41.177 ms | 98.087 ms | 10.195 | PASS |
-| YOLO11x-seg | 640×640 | 7.795 ms | 120.255 ms | 40.465 ms | 168.516 ms | 5.934 | PASS |
-| YOLO11n-seg | 960×960 | 10.734 ms | 28.990 ms | 54.607 ms | 94.330 ms | 10.601 | PASS |
-| YOLO11s-seg | 960×960 | 10.668 ms | 44.781 ms | 56.132 ms | 111.581 ms | 8.962 | PASS |
+| YOLO11n-seg | 640×640 | 7.697 ms | 11.110 ms | 28.775 ms | 47.583 ms | 21.016 | PASS |
+| YOLO11s-seg | 640×640 | 7.713 ms | 26.578 ms | 29.622 ms | 63.913 ms | 15.646 | PASS |
+| YOLO11m-seg | 640×640 | 7.581 ms | 47.658 ms | 29.243 ms | 84.482 ms | 11.837 | PASS |
+| YOLO11l-seg | 640×640 | 7.746 ms | 52.741 ms | 28.502 ms | 88.988 ms | 11.237 | PASS |
+| YOLO11x-seg | 640×640 | 7.662 ms | 124.878 ms | 28.331 ms | 160.872 ms | 6.216 | PASS |
+| YOLO11n-seg | 960×960 | 10.672 ms | 28.248 ms | 42.491 ms | 81.411 ms | 12.283 | PASS |
+| YOLO11s-seg | 960×960 | 10.791 ms | 44.532 ms | 43.120 ms | 98.442 ms | 10.158 | PASS |
 
 ### Measured I420 Performance (2026-11-21)
 
 | Model profile | Input | Preprocess | Inference | Postprocess | End-to-end | FPS | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.189 ms | 7.329 ms | 22.579 ms | 37.096 ms | 26.957 | PASS |
-| YOLO11s-seg | 640×640 | 7.262 ms | 22.701 ms | 22.839 ms | 52.803 ms | 18.938 | PASS |
-| YOLO11m-seg | 640×640 | 7.229 ms | 43.981 ms | 22.732 ms | 73.941 ms | 13.524 | PASS |
-| YOLO11l-seg | 640×640 | 7.179 ms | 48.249 ms | 22.400 ms | 77.828 ms | 12.849 | PASS |
-| YOLO11x-seg | 640×640 | 7.434 ms | 120.362 ms | 22.916 ms | 150.712 ms | 6.635 | PASS |
-| YOLO11n-seg | 960×960 | 10.467 ms | 29.064 ms | 36.084 ms | 75.615 ms | 13.225 | PASS |
-| YOLO11s-seg | 960×960 | 10.493 ms | 44.733 ms | 35.984 ms | 91.210 ms | 10.964 | PASS |
+| YOLO11n-seg | 640×640 | 6.982 ms | 11.298 ms | 16.084 ms | 34.363 ms | 29.101 | PASS |
+| YOLO11s-seg | 640×640 | 7.122 ms | 26.013 ms | 16.672 ms | 49.807 ms | 20.077 | PASS |
+| YOLO11m-seg | 640×640 | 6.986 ms | 47.831 ms | 16.548 ms | 71.366 ms | 14.012 | PASS |
+| YOLO11l-seg | 640×640 | 7.041 ms | 52.464 ms | 16.342 ms | 75.847 ms | 13.184 | PASS |
+| YOLO11x-seg | 640×640 | 7.048 ms | 125.098 ms | 16.338 ms | 148.485 ms | 6.735 | PASS |
+| YOLO11n-seg | 960×960 | 10.238 ms | 28.069 ms | 29.133 ms | 67.439 ms | 14.828 | PASS |
+| YOLO11s-seg | 960×960 | 10.283 ms | 44.100 ms | 29.264 ms | 83.648 ms | 11.955 | PASS |
 
-All seven profiles use the consolidated source and original ONNX models, measured serially after a power cycle.
-Each input uses one warmup and ten measured frames, capture disabled, at a 920 MHz RPP clock.
-PRE includes input H2D; POST includes output D2H. Engine construction, image decoding and visualization
-are excluded. PASS in these tables denotes completed runtime/performance measurement.
+All seven profiles use the shared paths and original ONNX models, measured in paired runs
+against preserved `f47941a` binaries. Each input uses one warmup and ten measured frames,
+capture disabled, at a 920 MHz RPP clock; all device tasks run serially.
+PRE includes input H2D; POST includes output D2H. Engine construction, image decoding and
+visualization are excluded. PASS denotes completed runtime/performance measurement.
+All fourteen measured end-to-end latencies were below the paired `f47941a` baseline.
 
-The accuracy-corrected pipeline remains slower than the original 1.6.11 baseline; no speedup is claimed.
-The full-application one-H2D/one-D2H objective is still incomplete. Baseline, measurement details and
-commands: [performance record](docs/performance-baseline.md).
+These results remain slower than the original 1.6.11 target; the full-application one-H2D/one-D2H
+objective is still incomplete. Original target, paired comparisons and commands:
+[performance record](docs/performance-baseline.md).
 
 ## Appendix: Export ONNX From a PT Model
 
@@ -531,9 +540,13 @@ build/bin/yolov11_seg_yuv_frame_demo \
 同一进程的 warmup 和测量帧共用该 engine。应用不序列化 engine，也不读写本地
 engine 缓存，已有 engine 文件会被忽略。构建属于初始化时间，不计入帧耗时。
 
-标准 640×640 导出模型会在内存中完成 DFL 通道归一化及 prototype 上采样适配。
-卷积先用 FP32 累加 bias，再采用最近舍入转为 BF16，不要求中间 ONNX，也不修改 SDK。
-推理阶段还包含在 RPP 上完成的 FP32 框坐标修正。
+七个规格使用同一个由形状驱动的 attention 适配、prototype 上采样适配及 RPP FP32 DFL/框
+解码实现。head 数、token 长度、通道数和 anchor 数均从模型图读取。卷积先用 FP32
+累加 bias，再采用最近舍入转为 BF16，不要求中间 ONNX，也不修改 SDK。
+
+后处理共用一个 RT NMS 图及稀疏 mask 实现。仅保留一处 SDK 输入兼容策略：8400 个 anchor
+直接输入，18900 个 anchor 稳定压缩。强制所有规格压缩会复现 l640 弱目标漏检，因此保留
+这项策略以保证已验证目标数量。客户接入流程及统一契约见[推理模块说明](rpp/inference/README.md#统一执行契约)。
 
 ## 代码执行流程
 
@@ -628,32 +641,33 @@ RPP_CFG_FILE="$PWD/build/config/rpp_syscfg.ini" /usr/local/rpp/bin/rpp_server
 
 | 模型 | 输入 | 前处理 | 推理 | 后处理 | 端到端 | FPS | 状态 |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.875 ms | 7.109 ms | 41.581 ms | 56.565 ms | 17.679 | PASS |
-| YOLO11s-seg | 640×640 | 7.737 ms | 22.997 ms | 42.443 ms | 73.177 ms | 13.665 | PASS |
-| YOLO11m-seg | 640×640 | 7.871 ms | 44.528 ms | 42.782 ms | 95.181 ms | 10.506 | PASS |
-| YOLO11l-seg | 640×640 | 7.717 ms | 49.193 ms | 41.177 ms | 98.087 ms | 10.195 | PASS |
-| YOLO11x-seg | 640×640 | 7.795 ms | 120.255 ms | 40.465 ms | 168.516 ms | 5.934 | PASS |
-| YOLO11n-seg | 960×960 | 10.734 ms | 28.990 ms | 54.607 ms | 94.330 ms | 10.601 | PASS |
-| YOLO11s-seg | 960×960 | 10.668 ms | 44.781 ms | 56.132 ms | 111.581 ms | 8.962 | PASS |
+| YOLO11n-seg | 640×640 | 7.697 ms | 11.110 ms | 28.775 ms | 47.583 ms | 21.016 | PASS |
+| YOLO11s-seg | 640×640 | 7.713 ms | 26.578 ms | 29.622 ms | 63.913 ms | 15.646 | PASS |
+| YOLO11m-seg | 640×640 | 7.581 ms | 47.658 ms | 29.243 ms | 84.482 ms | 11.837 | PASS |
+| YOLO11l-seg | 640×640 | 7.746 ms | 52.741 ms | 28.502 ms | 88.988 ms | 11.237 | PASS |
+| YOLO11x-seg | 640×640 | 7.662 ms | 124.878 ms | 28.331 ms | 160.872 ms | 6.216 | PASS |
+| YOLO11n-seg | 960×960 | 10.672 ms | 28.248 ms | 42.491 ms | 81.411 ms | 12.283 | PASS |
+| YOLO11s-seg | 960×960 | 10.791 ms | 44.532 ms | 43.120 ms | 98.442 ms | 10.158 | PASS |
 
 ### I420 实测性能（2026-11-21）
 
 | 模型 | 输入 | 前处理 | 推理 | 后处理 | 端到端 | FPS | 状态 |
 |---|---:|---:|---:|---:|---:|---:|---|
-| YOLO11n-seg | 640×640 | 7.189 ms | 7.329 ms | 22.579 ms | 37.096 ms | 26.957 | PASS |
-| YOLO11s-seg | 640×640 | 7.262 ms | 22.701 ms | 22.839 ms | 52.803 ms | 18.938 | PASS |
-| YOLO11m-seg | 640×640 | 7.229 ms | 43.981 ms | 22.732 ms | 73.941 ms | 13.524 | PASS |
-| YOLO11l-seg | 640×640 | 7.179 ms | 48.249 ms | 22.400 ms | 77.828 ms | 12.849 | PASS |
-| YOLO11x-seg | 640×640 | 7.434 ms | 120.362 ms | 22.916 ms | 150.712 ms | 6.635 | PASS |
-| YOLO11n-seg | 960×960 | 10.467 ms | 29.064 ms | 36.084 ms | 75.615 ms | 13.225 | PASS |
-| YOLO11s-seg | 960×960 | 10.493 ms | 44.733 ms | 35.984 ms | 91.210 ms | 10.964 | PASS |
+| YOLO11n-seg | 640×640 | 6.982 ms | 11.298 ms | 16.084 ms | 34.363 ms | 29.101 | PASS |
+| YOLO11s-seg | 640×640 | 7.122 ms | 26.013 ms | 16.672 ms | 49.807 ms | 20.077 | PASS |
+| YOLO11m-seg | 640×640 | 6.986 ms | 47.831 ms | 16.548 ms | 71.366 ms | 14.012 | PASS |
+| YOLO11l-seg | 640×640 | 7.041 ms | 52.464 ms | 16.342 ms | 75.847 ms | 13.184 | PASS |
+| YOLO11x-seg | 640×640 | 7.048 ms | 125.098 ms | 16.338 ms | 148.485 ms | 6.735 | PASS |
+| YOLO11n-seg | 960×960 | 10.238 ms | 28.069 ms | 29.133 ms | 67.439 ms | 14.828 | PASS |
+| YOLO11s-seg | 960×960 | 10.283 ms | 44.100 ms | 29.264 ms | 83.648 ms | 11.955 | PASS |
 
-七个规格均使用当前收敛代码及原始 ONNX，在断电重启后串行实测。每个输入预热 1 帧、
-测量 10 帧，关闭精度采集，RPP 主频 920 MHz。前处理包含输入 H2D，后处理包含输出 D2H；
-不包含 engine 构建、图片读取和可视化。表中 PASS 表示该项运行与性能测量通过。
+七个规格均使用本次公共路径及原始 ONNX，与 `f47941a` 对照二进制逐项配对实测。
+每种输入预热 1 帧、测量 10 帧，关闭精度采集，RPP 主频 920 MHz；所有设备任务串行。
+前处理包含输入 H2D，后处理包含输出 D2H，不包含 engine 构建、图片读取和可视化。
+表中 PASS 表示运行与测量通过。相对 `f47941a`，十四项端到端实测均未出现回退。
 
-当前精度修复版仍慢于原 1.6.11 基准，不宣称性能提升；完整应用的一次 H2D/一次 D2H 目标尚未完成。
-原基准、逐阶段口径及复现命令见[性能记录](docs/performance-baseline.md)。
+当前结果仍慢于原 1.6.11 性能目标；完整应用的一次 H2D/一次 D2H 目标尚未完成。
+原始目标、配对对照及复现命令见[性能记录](docs/performance-baseline.md)。
 
 ## 附录：从 PT 模型导出 ONNX
 

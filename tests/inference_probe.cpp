@@ -23,7 +23,7 @@
 int main(int argc, char** argv)
 {
     if (argc < 4 || argc > 6) {
-        std::cerr << "Usage: inference_probe model.onnx input.f32 output_dir [--application|--application-unpatched [tensor_name]]\n";
+        std::cerr << "Usage: inference_probe model.onnx input.f32 output_dir [--application|--application-unpatched|--precision-only [tensor_name]]\n";
         return 2;
     }
     try {
@@ -41,8 +41,10 @@ int main(int argc, char** argv)
             throw std::runtime_error("Cannot parse model");
         const bool application = argc >= 5 && (std::string(argv[4]) == "--application" ||
             std::string(argv[4]) == "--application-unpatched");
-        const bool precision_enabled = application && std::string(argv[4]) == "--application";
-        if (argc >= 5 && !application) throw std::runtime_error("Unknown probe mode");
+        // Isolate convolution arithmetic tests from the segmentation contract.
+        const bool precision_only = argc >= 5 && std::string(argv[4]) == "--precision-only";
+        const bool precision_enabled = precision_only || (application && std::string(argv[4]) == "--application");
+        if (argc >= 5 && !application && !precision_only) throw std::runtime_error("Unknown probe mode");
         std::vector<std::vector<float>> adapted_weights;
         if (application) adaptSegmentationNetwork(*network, adapted_weights);
         if (argc == 6) {

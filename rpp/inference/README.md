@@ -14,7 +14,7 @@ construction; changing a filename does not change profile eligibility.
 
 - Parse the ONNX model.
 - Build a fresh OpenRT execution engine from ONNX for every application process.
-- Adapt DFL channel normalization and prototype upsampling in memory.
+- Expose a single DFL-logit contract and adapt attention/prototype operations in memory.
 - Correct convolution bias accumulation and BF16 output rounding on RPP.
 - Restore FP32 anchor/stride box coordinates from an internal device DFL binding.
 - Own model input and output binding buffers.
@@ -49,17 +49,18 @@ Scratch SRAM is allocated after OpenRT execution and freed before POST or the ne
 frame, matching the existing PRE/POST workspace lifetime. Inference timing includes
 this model-head coordinate correction.
 
-640×640 retains its device DFL-distance decoder. At 960×960, OpenRT exposes
-contiguous `[4,16,N]` logits before the large DFL transpose. An RPP kernel performs
-max-subtracted FP32 normalization, expectation and coordinate decoding. No NaN/Inf
-replacement or CPU numerical fallback is used. Validation mode also captures the
-raw internal DFL tensor and checks finiteness before accepting the public outputs.
+All release profiles expose contiguous `[4,16,N]` DFL logits. The same RPP kernel
+performs max-subtracted FP32 normalization, expectation and coordinate decoding.
+`N` is computed from the model input and strides 8/16/32. No profile selects a
+second DFL algorithm. Validation captures the logits and public outputs and checks
+finiteness and repeatability against ONNX Runtime.
 
-960-square attention with four heads uses independent head/query tiles,
-padded keys with an explicit exclusion mask, and a final crop to the original
-900 queries. The n960 two-head profile retains the native parser path. The application builds
-these equivalent operations in memory through OpenRT. Source ONNX files remain
-unchanged; validated model scope is in the root README.
+All attention blocks use the same head/query decomposition: the adapter identifies
+MatMul → Softmax → transpose → MatMul by graph connectivity, reads the head count,
+token length and channel widths, aligns key length to 32 and query length to 96, applies an
+explicit key exclusion mask, and crops to the original length. Prototype upsampling
+uses the same 1×1 projection and phase shuffle for every model. Source ONNX files
+remain unchanged; tensor/layer names do not select an implementation.
 
 Convolution corrections are assembled at build time from the installed SDK's
 assembly sources. At first inference, the application checks the temporary OpenRT
@@ -78,9 +79,34 @@ The enhanced convolution path serves the release-supported 640×640 and 960×960
 - `rpp_precision_module.h/.cpp`: scoped module preparation and compatibility checks.
 - `generate_precision_kernels.py`, `precision_assembler.cpp`: build-time correction generator.
 
+## Shared Execution Contract
+
+```text
+Original ONNX → graph contract / common adaptation → fresh BF16 OpenRT engine
+             → FP32 RPP DFL / box decode → prediction + prototype
+```
+
+The application then uses one RT NMS graph → selected coefficient gather → sparse
+prototype probabilities → composed ROI interpolation. Input preparation retains
+one SDK compatibility policy: 8400-anchor heads bind the prediction directly;
+18900-anchor heads use stable compaction. Both use the same original-anchor map
+and result parser. Forcing compaction for l640 reproduced a missing weak object
+on an idle device, so this policy remains until SDK candidate selection is corrected.
+The shared interpolation merges repeated taps into three taps per axis. Input
+format handling and error checks remain separate from model computation.
+The release gate checks support at initialization; it does not select an inference
+or mask implementation. A new export needs numerical qualification of the NMS
+input policy as well as its model contract.
+
 ## Reuse Notes
 
-Reuse this module when the model can be loaded through the same OpenRT ONNX flow. Keep model-specific preprocessing, postprocessing, labels, and visualization outside this module.
+Customer integration follows the same API sequence: `init()` → write the input binding
+through preprocessing → `execute()` → consume prediction/prototype in postprocessing.
+Read dimensions from the engine; do not introduce n/s/m/l/x or 640/960 dispatch.
+The current export contract fixes batch 1, FP32 NCHW, COCO80 classes, 32 mask channels
+and 16 DFL bins. Changes to this contract require a coordinated adaptation and accuracy audit.
+Keep labels, input decoding and visualization outside this module. Retain the supplied
+precision module and build helpers: their guarded SDK compatibility is part of this demo.
 
 ---
 
@@ -99,7 +125,7 @@ Reuse this module when the model can be loaded through the same OpenRT ONNX flow
 
 - 解析 ONNX 模型。
 - 每个应用进程都从 ONNX 重新构建 OpenRT 执行 engine。
-- 在内存中适配 DFL 通道归一化与 prototype 上采样。
+- 在内存中建立统一 DFL logits 契约，适配 attention/prototype 操作。
 - 在 RPP 上修正卷积 bias 累加及 BF16 输出舍入。
 - 从内部设备 DFL binding 恢复 FP32 anchor/stride 框坐标。
 - 管理模型输入和输出 binding buffer。
@@ -131,13 +157,14 @@ kernel 以 FP32 更新 prediction 的前四个平面，只做设备/SRAM 搬运�
 临时 SRAM 在 OpenRT 执行后分配，并在 POST 或下一帧之前释放，与现有 PRE/POST 的
 workspace 生命周期一致。推理阶段计时包含这部分模型 head 坐标修正。
 
-640×640 保留设备端 DFL 距离解码。960×960 直接输出大型 DFL 转置之前连续存储的
-`[4,16,N]` logits，再由 RPP kernel 执行减最大值的 FP32 归一化、期望值和框坐标解码。
-没有用替换 NaN/Inf 或 CPU 数值回退掩盖异常；校验模式还会采集内部 DFL 原始张量并检查有限性。
+所有发布规格均输出连续的 `[4,16,N]` DFL logits，由同一 RPP kernel 完成减最大值的
+FP32 归一化、期望值和坐标解码。`N` 由模型输入尺寸及 stride 8/16/32 推导，不按规格
+选择第二种 DFL 算法。验证采集 logits 与公开输出，检查有限性、重复一致性及 ONNX Runtime 精度。
 
-960 规格的四 head attention 使用独立 head/query 分块，补齐的 key 带显式排除 mask，
-最后裁剪回原有的 900 个 query；n960 的双 head 使用原生解析路径。应用通过 OpenRT 在内存中构建等价操作，原始 ONNX
-保持不变；实际通过验证的型号范围见根 README。
+所有 attention 块均使用同一个 head/query 分块实现：按 MatMul → Softmax → 转置 → MatMul
+的图连接识别，从图读取 head 数、token 长度和通道宽度；key 长度按 32 对齐，query 长度按 96 对齐，
+显式屏蔽填充 key，再裁剪回原长度。所有模型的 prototype 上采样均使用相同的 1×1 投影
+和 phase shuffle。原始 ONNX 不变，不根据 tensor/layer 名称选择实现。
 
 卷积修正使用已安装 SDK 的汇编源在构建时生成。首次推理时，应用核对 OpenRT 临时
 模块的汇编源、代码长度及参数 ABI，再通过 `rppModuleLoadData` 加载已修正的卷积
@@ -154,6 +181,25 @@ POST engine 继续使用自身模块。不会修改已安装 SDK 文件。
 - `rpp_precision_module.h/.cpp`：限定作用范围的模块准备及兼容检查。
 - `generate_precision_kernels.py`、`precision_assembler.cpp`：构建时生成卷积修正。
 
+## 统一执行契约
+
+```text
+原始 ONNX → 模型契约 / 公共适配 → 新建 BF16 OpenRT engine
+          → RPP FP32 DFL / 框解码 → prediction + prototype
+```
+
+应用后续共用一个 RT NMS 图 → 选中系数收集 → 稀疏 prototype 概率 → ROI 插值。
+输入准备保留一处 SDK 兼容策略：8400-anchor head 直接绑定 prediction，18900-anchor head
+先稳定压缩；两者使用相同的原 anchor 映射及结果解析。强制为 l640 压缩时，在设备空闲
+状态复现了弱目标漏检，因此在 SDK 候选选择修正之前保留此策略。
+公共插值将重复采样合并为每轴三个 tap。输入格式处理和错误检查独立于模型计算。
+发布边界仅在初始化时检查支持策略，不用于选择推理或 mask 实现。新导出模型除检查
+张量契约外，还需对 NMS 输入策略进行数值验证。
+
 ## 复用说明
 
-当模型可以通过相同的 OpenRT ONNX 流程加载时，可复用本模块。模型相关的前处理、后处理、标签和可视化逻辑应放在本模块之外。
+客户接入遵循相同 API 顺序：`init()` → 前处理写输入 binding → `execute()` → 后处理读取
+prediction/prototype。尺寸从 engine 读取，不增加 n/s/m/l/x 或 640/960 分发。
+当前导出契约固定 batch 1、FP32 NCHW、COCO80、32 个 mask 通道和 16 个 DFL bin；
+契约变化需要统一调整适配并重新进行精度验证。标签、图片解码和可视化位于模块之外。
+移植时需保留精度模块及构建辅助代码，其 SDK 兼容检查是本 demo 的组成部分。
