@@ -181,6 +181,7 @@ private:
     int nms_score_threshold_index_ = -1;
     int nms_indices_index_ = -1;
     int nms_count_index_ = -1;
+    int nms_anchor_map_elements_ = 0;
     int nms_indices_elements_ = 0;
     int nms_count_elements_ = 0;
     int nms_index_tuple_size_ = 3;
@@ -188,6 +189,8 @@ private:
     void* nms_scores_device_ = nullptr;
     void* nms_constants_device_ = nullptr;
     void* nms_outputs_device_ = nullptr;
+    void* nms_compact_device_ = nullptr;
+    bool compactRppNmsInput(const void* input, int32_t* device_map);
     void* nms_boxes_host_ = nullptr;
     void* nms_scores_host_ = nullptr;
     void* nms_outputs_host_ = nullptr;

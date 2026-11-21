@@ -3,19 +3,16 @@
  * @brief Reusable OpenRT inference engine wrapper implementation.
  */
 #include "rpp_infer_engine.h"
+#include "rpp_precision_module.h"
+#include "rpp_segmentation_network.h"
+#include "rpp_box_decode.cuh"
 
 #include "logger.h"
 #include "parser_api.h"
 #include "sampleCommon.h"
 
-#include <cstdint>
 #include <exception>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
-#include <vector>
 
 namespace
 {
@@ -43,150 +40,27 @@ bool parseInputSpatialDims(const infer1::Dims& dims, int& width, int& height)
     return width > 0 && height > 0;
 }
 
-std::string fingerprintFile(const std::string& path)
-{
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        return {};
-    }
-    std::uint64_t hash = 14695981039346656037ULL;
-    char buffer[64 * 1024];
-    while (input.read(buffer, sizeof(buffer)) || input.gcount() > 0) {
-        for (std::streamsize i = 0; i < input.gcount(); ++i) {
-            hash ^= static_cast<unsigned char>(buffer[i]);
-            hash *= 1099511628211ULL;
-        }
-    }
-    std::ostringstream value;
-    value << std::hex << std::setfill('0') << std::setw(16) << hash;
-    return value.str();
-}
-
-std::string fingerprintData(const void* data, size_t size)
-{
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    std::uint64_t hash = 14695981039346656037ULL;
-    for (size_t i = 0; i < size; ++i) {
-        hash ^= bytes[i];
-        hash *= 1099511628211ULL;
-    }
-    std::ostringstream value;
-    value << std::hex << std::setfill('0') << std::setw(16) << hash;
-    return value.str();
-}
-
-std::filesystem::path engineCachePath(const std::string& model_path,
-                                      const std::string& model_fingerprint)
-{
-    const std::filesystem::path model(model_path);
-    std::ostringstream filename;
-    filename << model.filename().string() << ".openrt" << OPENRT_VERSION
-             << ".bf16." << model_fingerprint << ".engine";
-    return model.parent_path() / ".engine_cache" / filename.str();
-}
-
-bool loadCachedEngine(const std::filesystem::path& cache_path,
-                      std::unique_ptr<infer1::IRuntime>& runtime,
-                      std::shared_ptr<infer1::IEngine>& engine)
-{
-    std::ifstream input(cache_path, std::ios::binary | std::ios::ate);
-    if (!input || input.tellg() <= 0) {
-        return false;
-    }
-    const std::streamsize size = input.tellg();
-    input.seekg(0, std::ios::beg);
-    std::vector<char> data(static_cast<size_t>(size));
-    if (!input.read(data.data(), size)) {
-        return false;
-    }
-
-    std::ifstream checksum_input(cache_path.string() + ".fnv1a");
-    std::string expected_fingerprint;
-    checksum_input >> expected_fingerprint;
-    if (expected_fingerprint.empty()
-        || expected_fingerprint != fingerprintData(data.data(), data.size())) {
-        std::cout << "[ENGINE  ] Engine cache integrity check failed; rebuilding from ONNX: "
-                  << cache_path << std::endl;
-        return false;
-    }
-
-    runtime.reset(infer1::createInferRuntime(sample::gLogger.getLogger()));
-    if (!runtime) {
-        return false;
-    }
-    try {
-        engine.reset(runtime->deserializeCudaEngine(data.data(), data.size()));
-    }
-    catch (const std::exception& error) {
-        engine.reset();
-        runtime.reset();
-        std::cout << "[ENGINE  ] Cached engine is invalid (" << error.what()
-                  << "); rebuilding from ONNX: " << cache_path << std::endl;
-        return false;
-    }
-    if (!engine) {
-        engine.reset();
-        runtime.reset();
-        std::cout << "[ENGINE  ] Cached engine format is incompatible; rebuilding from ONNX: "
-                  << cache_path << std::endl;
-        return false;
-    }
-    return true;
-}
-
-bool saveEngineCache(const std::filesystem::path& cache_path, const infer1::IEngine& engine)
-{
-    std::unique_ptr<infer1::IHostMemory> serialized(engine.serialize());
-    if (!serialized || !serialized->data() || serialized->size() == 0) {
-        return false;
-    }
-    std::error_code error;
-    std::filesystem::create_directories(cache_path.parent_path(), error);
-    if (error) {
-        return false;
-    }
-    const std::filesystem::path temporary_path = cache_path.string() + ".tmp";
-    const std::filesystem::path checksum_path = cache_path.string() + ".fnv1a";
-    const std::filesystem::path checksum_temporary_path = checksum_path.string() + ".tmp";
-    std::ofstream output(temporary_path, std::ios::binary | std::ios::trunc);
-    if (!output.write(static_cast<const char*>(serialized->data()),
-                      static_cast<std::streamsize>(serialized->size()))) {
-        return false;
-    }
-    output.close();
-    std::ofstream checksum_output(checksum_temporary_path, std::ios::trunc);
-    checksum_output << fingerprintData(serialized->data(), serialized->size()) << '\n';
-    if (!checksum_output) {
-        return false;
-    }
-    checksum_output.close();
-    std::filesystem::rename(temporary_path, cache_path, error);
-    if (error) {
-        return false;
-    }
-    std::filesystem::rename(checksum_temporary_path, checksum_path, error);
-    return !error;
-}
 }
 
 /**
- * @brief Build the OpenRT engine from ONNX and prepare device binding buffers.
+ * @brief Build a fresh OpenRT engine from ONNX for this application process.
  */
 bool RppInferEngine::init()
 {
-    const std::string model_fingerprint = fingerprintFile(onnx_model_path_);
-    if (model_fingerprint.empty()) {
-        std::cerr << "Unable to read ONNX model: " << onnx_model_path_ << std::endl;
-        return false;
-    }
-    const std::filesystem::path cache_path = engineCachePath(onnx_model_path_, model_fingerprint);
+    context_ptr_.reset();
+    releaseBoxBuffers();
+    buffer_ptr_.reset();
+    engine_ptr_.reset();
+    output_infos_.clear();
+    std::cout << "[ENGINE  ] Building OpenRT engine from ONNX: "
+              << onnx_model_path_ << std::endl;
+    if (!buildFromOnnx() || !initializeBindings()) return false;
+    std::cout << "[ENGINE  ] OpenRT engine ready" << std::endl;
+    return true;
+}
 
-    if (loadCachedEngine(cache_path, runtime_ptr_, engine_ptr_)) {
-        std::cout << "[ENGINE  ] Reusing cached OpenRT engine: " << cache_path << std::endl;
-    }
-    else {
-        std::cout << "[ENGINE  ] No reusable engine cache found; building from ONNX: "
-                  << onnx_model_path_ << std::endl;
+bool RppInferEngine::buildFromOnnx()
+{
     // Create the builder, network, and config objects that turn ONNX into an executable engine.
     std::unique_ptr<infer1::IBuilder> builder {infer1::createInferBuilder(sample::gLogger.getLogger())};
     if (builder == nullptr) {
@@ -222,12 +96,26 @@ bool RppInferEngine::init()
         return false;
     }
 
+    std::vector<std::vector<float>> adapted_weights;
+    try {
+        validateSupportedSegmentationModel(*network);
+        distances_name_ = adaptSegmentationNetwork(*network, adapted_weights);
+    } catch (const std::exception& error) {
+        std::cerr << "OpenRT segmentation adaptation failed: " << error.what() << std::endl;
+        return false;
+    }
+
     // Build a single-batch BF16-capable engine for the demo inference path.
     builder->setMaxBatchSize(1);
     config->setMaxWorkspaceSize((size_t)1_GiB);
     config->setFlag(BuilderFlag::kBF16);
 
-    engine_ptr_ = std::shared_ptr<infer1::IEngine>(builder->buildEngineWithConfig(*network, *config));
+    try {
+        engine_ptr_ = std::shared_ptr<infer1::IEngine>(builder->buildEngineWithConfig(*network, *config));
+    } catch (const std::exception& error) {
+        std::cerr << "OpenRT could not build the ONNX engine: " << error.what() << std::endl;
+        return false;
+    }
     if (!engine_ptr_) {
         return false;
     }
@@ -236,15 +124,11 @@ bool RppInferEngine::init()
         sample::user_visible_log("Since the model includes quantization layers, inference is performed with int8 precision.");
     }
 
-        if (saveEngineCache(cache_path, *engine_ptr_)) {
-            std::cout << "[ENGINE  ] Built and cached OpenRT engine: " << cache_path << std::endl;
-        }
-        else {
-            std::cout << "[ENGINE  ] Built OpenRT engine; cache could not be written: "
-                      << cache_path << std::endl;
-        }
-    }
+    return true;
+}
 
+bool RppInferEngine::initializeBindings()
+{
     // Cache binding names, shapes, data types, and element counts for pipeline stages.
     output_infos_.clear();
     for (int i = 0; i < engine_ptr_->getNbBindings(); i++) {
@@ -259,6 +143,7 @@ bool RppInferEngine::init()
             }
         }
         else {
+            if (distances_name_ == engine_ptr_->getBindingName(i)) continue;
             RppInferOutputInfo output;
             output.name = engine_ptr_->getBindingName(i);
             output.dimensions = engine_ptr_->getBindingDimensions(i);
@@ -284,7 +169,65 @@ bool RppInferEngine::init()
 
     // Create the execution context used by execute().
     context_ptr_.reset(engine_ptr_->createExecutionContext());
-    return context_ptr_ != nullptr;
+    if (!context_ptr_) return false;
+    if (!distances_name_.empty()) {
+        box_anchors_ = (input_width_ / 8) * (input_height_ / 8) +
+                       (input_width_ / 16) * (input_height_ / 16) +
+                       (input_width_ / 32) * (input_height_ / 32);
+        const size_t head_bytes = buffer_ptr_->size(distances_name_);
+        device_dfl_ = head_bytes == size_t(64) * box_anchors_ * sizeof(float);
+        if (!device_dfl_ && head_bytes != size_t(4) * box_anchors_ * sizeof(float))
+            return false;
+        prediction_name_.clear();
+        for (const auto& output : output_infos_)
+            if (output.elements == size_t(116) * box_anchors_) prediction_name_ = output.name;
+        if (prediction_name_.empty()) return false;
+        std::cout << "[ENGINE  ] FP32 RPP box coordinates enabled" << std::endl;
+    }
+    return true;
+}
+
+RppInferEngine::~RppInferEngine()
+{
+    context_ptr_.reset();
+    releaseBoxBuffers();
+}
+
+void RppInferEngine::releaseBoxBuffers()
+{
+    if (distances_sram_) rtFreeSram(distances_sram_);
+    if (boxes_sram_) rtFreeSram(boxes_sram_);
+    distances_sram_ = boxes_sram_ = nullptr;
+}
+
+bool RppInferEngine::decodeBoxes()
+{
+    if (distances_name_.empty()) return true;
+    const size_t bytes = size_t(4) * box_anchors_ * sizeof(float);
+    const size_t input_bytes = device_dfl_ ? bytes * 16 : bytes;
+    // OpenRT and the custom PRE/POST stages share SRAM. Allocate only after
+    // synchronous inference and release before the next stage/frame; a custom
+    // persistent allocation may otherwise overlap the SDK's execution workspace.
+    if (rtMallocSram(&distances_sram_, input_bytes) != rtSuccess ||
+        rtMallocSram(&boxes_sram_, bytes) != rtSuccess) {
+        releaseBoxBuffers();
+        return false;
+    }
+    if (rtMemcpy(distances_sram_, buffer_ptr_->getDeviceBuffer(distances_name_), input_bytes,
+                 rtMemcpyDeviceToSram) != rtSuccess) {
+        releaseBoxBuffers();
+        return false;
+    }
+    if (device_dfl_) launch_yolo11_dfl_decode(nullptr, static_cast<const float*>(distances_sram_),
+                            static_cast<float*>(boxes_sram_), input_width_, input_height_, box_anchors_);
+    else launch_yolo11_box_decode(nullptr, static_cast<const float*>(distances_sram_),
+                            static_cast<float*>(boxes_sram_), input_width_, input_height_,
+                            box_anchors_);
+    const bool passed = rtStreamSynchronize(nullptr) == rtSuccess &&
+                        rtMemcpy(buffer_ptr_->getDeviceBuffer(prediction_name_), boxes_sram_, bytes,
+                                 rtMemcpySramToDevice) == rtSuccess;
+    releaseBoxBuffers();
+    return passed;
 }
 
 /**
@@ -314,6 +257,16 @@ void* RppInferEngine::getOutputDeviceBuffer(size_t output_index) const
     return buffer_ptr_->getDeviceBuffer(output_infos_[output_index].name);
 }
 
+void* RppInferEngine::getBoxHeadDeviceBuffer() const
+{
+    return buffer_ptr_ && !distances_name_.empty() ? buffer_ptr_->getDeviceBuffer(distances_name_) : nullptr;
+}
+
+size_t RppInferEngine::getBoxHeadElements() const
+{
+    return buffer_ptr_ && !distances_name_.empty() ? buffer_ptr_->size(distances_name_) / sizeof(float) : 0;
+}
+
 /**
  * @brief Execute one synchronous model inference using current device bindings.
  */
@@ -325,12 +278,18 @@ bool RppInferEngine::executeContext()
         return false;
     }
 
-    bool ok = context_ptr_->execute(1, buffer_ptr_->getDeviceBindings().data());
+    bool ok;
+    {
+        yolo11::ScopedConvolutionPrecision precision(
+            (input_width_ == 640 && input_height_ == 640) ||
+            (input_width_ == 960 && input_height_ == 960));
+        ok = context_ptr_->execute(1, buffer_ptr_->getDeviceBindings().data());
+    }
     if (!ok) {
         sample::LOG_ERROR() << "do inference failed." << std::endl;
         return false;
     }
-    return true;
+    return decodeBoxes();
 }
 
 /**

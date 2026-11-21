@@ -16,6 +16,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 
 namespace
 {
@@ -95,6 +98,17 @@ double elapsed_ms(const std::chrono::high_resolution_clock::time_point& start,
                   const std::chrono::high_resolution_clock::time_point& stop)
 {
     return std::chrono::duration<double, std::milli>(stop - start).count();
+}
+
+// Explicit diagnostic mode only. Captures are not performance measurements.
+bool capture_device_tensor(const std::filesystem::path& path, const void* device, size_t elements)
+{
+    std::vector<float> values(elements);
+    if (rtMemcpy(values.data(), device, elements * sizeof(float), rtMemcpyDeviceToHost) != rtSuccess)
+        return false;
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(values.data()), elements * sizeof(float));
+    return static_cast<bool>(out);
 }
 }
 
@@ -302,7 +316,7 @@ bool YoloV11SegPipeline::runInput(const void* data,
             return false;
         }
         // The normalized tensor has already been copied to the inference DDR binding.
-        // Release PRE SRAM before inference/POST so 960x960 and 1280x1024 models
+        // Release PRE SRAM before inference/POST so supported large tensors
         // have enough SRAM for their larger prototype and sparse-mask workspaces.
         preprocessor_->releaseSramBuffers();
     }
@@ -328,6 +342,29 @@ bool YoloV11SegPipeline::runInput(const void* data,
     }
     auto inference_stop = std::chrono::high_resolution_clock::now();
     local_times.inference_ms = elapsed_ms(inference_start, inference_stop);
+
+    std::filesystem::path capture_dir;
+    if (const char* root = std::getenv("YOLO_VALIDATION_DIR")) {
+        capture_dir = std::filesystem::path(root) / ("frame" + std::to_string(validation_frame_index_++));
+        std::filesystem::create_directories(capture_dir);
+        if (!capture_device_tensor(capture_dir / "input.f32", infer_engine_->getInputDeviceBuffer(),
+                                    size_t(config_.input_width) * config_.input_height * 3) ||
+            !capture_device_tensor(capture_dir / "prediction.f32",
+                infer_engine_->getOutputDeviceBuffer(detection_output_index_), config_.detection_elements) ||
+            !capture_device_tensor(capture_dir / "prototype.f32",
+                infer_engine_->getOutputDeviceBuffer(prototype_output_index_), config_.prototype_elements))
+            return false;
+        if (infer_engine_->getBoxHeadDeviceBuffer() &&
+            !capture_device_tensor(capture_dir / "dfl_input.f32", infer_engine_->getBoxHeadDeviceBuffer(),
+                                   infer_engine_->getBoxHeadElements())) return false;
+        std::ofstream meta(capture_dir / "geometry.txt");
+        meta << std::setprecision(9);
+        meta << letterbox.source_width << ' ' << letterbox.source_height << ' '
+             << letterbox.model_width << ' ' << letterbox.model_height << ' '
+             << letterbox.resized_width << ' ' << letterbox.resized_height << ' '
+             << letterbox.pad_x << ' ' << letterbox.pad_y << ' ' << letterbox.scale << '\n';
+        if (!meta) return false;
+    }
 
     YoloV11SegPostprocessProfile postprocess_profile;
     auto postprocess_start = std::chrono::high_resolution_clock::now();
@@ -356,6 +393,21 @@ bool YoloV11SegPipeline::runInput(const void* data,
     // Report postprocess compute/control separately from D2H. The runtime calls are
     // synchronous, so subtracting the measured D2H regions avoids double counting.
     local_times.postprocess_ms = std::max(0.0, postprocess_total_ms - local_times.output_d2h_ms);
+
+    if (!capture_dir.empty()) {
+        std::ofstream records(capture_dir / "segments.csv");
+        records << std::setprecision(9);
+        for (size_t i = 0; i < segments.size(); ++i) {
+            const auto& s = segments[i];
+            records << i << ',' << s.class_id << ',' << s.confidence << ','
+                    << s.box.x << ',' << s.box.y << ',' << s.box.width << ',' << s.box.height
+                    << ',' << s.mask_width << ',' << s.mask_height << '\n';
+            std::ofstream mask(capture_dir / ("mask" + std::to_string(i) + ".u8"), std::ios::binary);
+            mask.write(reinterpret_cast<const char*>(s.mask.data()), s.mask.size());
+            if (!mask) return false;
+        }
+        if (!records) return false;
+    }
 
     if (std::getenv("YOLO_POST_PROFILE") != nullptr) {
         std::cout << "POST profile:"

@@ -35,6 +35,7 @@ public:
      */
     explicit RppInferEngine(const std::string& onnx_path)
         : onnx_model_path_(onnx_path) {}
+    ~RppInferEngine();
 
     /**
      * @brief Parse ONNX, build the OpenRT engine, allocate bindings, and create execution context.
@@ -84,18 +85,26 @@ public:
      */
     void* getOutputDeviceBuffer(size_t output_index) const;
 
+    // Optional diagnostic capture of the internal DFL tensor, before decode.
+    void* getBoxHeadDeviceBuffer() const;
+    size_t getBoxHeadElements() const;
+
     /**
      * @brief Execute the runtime context synchronously with current device bindings.
      */
     bool execute();
 
 private:
+    bool buildFromOnnx();
+    bool initializeBindings();
+    bool decodeBoxes();
+    void releaseBoxBuffers();
+
     /**
      * @brief Run synchronous inference on the current execution context.
      */
     bool executeContext();
 
-    std::unique_ptr<infer1::IRuntime> runtime_ptr_ {nullptr};
     std::shared_ptr<infer1::IEngine> engine_ptr_ {nullptr};
     std::shared_ptr<samplesCommon::RppBufferManager> buffer_ptr_ {nullptr};
     std::unique_ptr<infer1::IExecutionContext> context_ptr_ {nullptr};
@@ -107,6 +116,12 @@ private:
 
     std::string input_name_;
     std::string output_name_;
+    std::string distances_name_;
+    std::string prediction_name_;
+    void* distances_sram_ = nullptr;
+    void* boxes_sram_ = nullptr;
+    int box_anchors_ = 0;
+    bool device_dfl_ = false;
     std::vector<RppInferOutputInfo> output_infos_;
     infer1::Dims output_dimensions_;
     infer1::DataType input_data_type_ {infer1::DataType::kFLOAT};

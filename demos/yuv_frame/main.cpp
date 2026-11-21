@@ -162,7 +162,7 @@ int main(int argc, char** argv)
 
     YoloV11SegPipeline pipeline;
     const std::vector<std::string>& class_list = coco80_class_labels();
-    demo_reporter::print_stage("INIT", "Loading or building OpenRT inference engine on RPP accelerator");
+    demo_reporter::print_stage("INIT", "Building OpenRT inference engine from ONNX on RPP accelerator");
     if (!pipeline.init(pipeline_options, class_list)) {
         return EXIT_FAILURE;
     }

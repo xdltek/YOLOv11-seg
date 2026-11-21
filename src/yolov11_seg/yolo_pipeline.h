@@ -143,6 +143,7 @@ private:
     int prototype_output_index_ = -1;
     rtStream_t stream_ = nullptr;
     bool initialized_ = false;
+    size_t validation_frame_index_ = 0;
 };
 
 #endif // XDLTEK_SAMPLES_YOLOV11_PIPELINE_H

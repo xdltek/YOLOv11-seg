@@ -49,6 +49,33 @@ set(YOLO_PERF_INCLUDE_DIR ${ROOT_DIRECTORY}/src/perf)
 set(RPP_INFERENCE_INCLUDE_DIR ${ROOT_DIRECTORY}/rpp/inference)
 set(RPP_PREPROCESS_INCLUDE_DIR ${ROOT_DIRECTORY}/rpp/preprocess)
 set(RPP_POSTPROCESS_INCLUDE_DIR ${ROOT_DIRECTORY}/rpp/postprocess)
+
+# Build the application's convolution correction with the installed SDK ISA.
+# Neither the SDK nor supplied ONNX models are modified.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_executable(yolov11_precision_assembler EXCLUDE_FROM_ALL
+    ${RPP_INFERENCE_INCLUDE_DIR}/precision_assembler.cpp
+)
+target_link_libraries(yolov11_precision_assembler PRIVATE rpp_asm)
+set_target_properties(yolov11_precision_assembler PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tools
+    BUILD_RPATH ${RppRT_LIBS}
+)
+file(GLOB YOLO_CONV_ASM_DEPENDENCIES CONFIGURE_DEPENDS
+    ${RppRT_INCLUDE_DIRS}/kernel/asm/mac8/*.s
+)
+set(YOLO_PRECISION_HEADER ${CMAKE_BINARY_DIR}/generated/rpp_precision_kernels.inc)
+add_custom_command(OUTPUT ${YOLO_PRECISION_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${RPP_INFERENCE_INCLUDE_DIR}/generate_precision_kernels.py
+        --sdk ${RppRT_INCLUDE_DIRS}/kernel/asm
+        --assembler $<TARGET_FILE:yolov11_precision_assembler>
+        --output ${YOLO_PRECISION_HEADER}
+    DEPENDS yolov11_precision_assembler
+        ${RPP_INFERENCE_INCLUDE_DIR}/generate_precision_kernels.py
+        ${RppRT_INCLUDE_DIRS}/kernel/asm/kernel_cfg.json
+        ${YOLO_CONV_ASM_DEPENDENCIES}
+    VERBATIM
+)
 add_library(yolov11_seg_utils SHARED
     ${ROOT_DIRECTORY}/src/utils/logger.cpp
     ${ROOT_DIRECTORY}/src/utils/logging.cpp
@@ -101,16 +128,37 @@ set_target_properties(rpp_yolo_preprocess PROPERTIES
 
 add_library(rpp_inference SHARED
     ${ROOT_DIRECTORY}/rpp/inference/rpp_infer_engine.cpp
+    ${RPP_INFERENCE_INCLUDE_DIR}/rpp_precision_module.cpp
+    ${RPP_INFERENCE_INCLUDE_DIR}/rpp_segmentation_network.cpp
+    ${RPP_INFERENCE_INCLUDE_DIR}/rpp_box_decode.cu
+    ${YOLO_PRECISION_HEADER}
 )
 target_include_directories(rpp_inference PUBLIC
     ${RPP_INFERENCE_INCLUDE_DIR}
     ${YOLO_UTILS_INCLUDE_DIR}
     ${RppRT_INCLUDE_DIRS}
 )
-target_link_libraries(rpp_inference PUBLIC yolov11_seg_utils ${rpprt_libs})
+target_include_directories(rpp_inference PRIVATE ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(rpp_inference PUBLIC yolov11_seg_utils ${rpprt_libs} PRIVATE dl)
 set_target_properties(rpp_inference PROPERTIES
     BUILD_RPATH "$ORIGIN;${RppRT_LIBS}"
 )
+
+add_executable(yolov11_precision_module_test EXCLUDE_FROM_ALL
+    ${ROOT_DIRECTORY}/tests/test_precision_module.cpp
+)
+target_include_directories(yolov11_precision_module_test PRIVATE ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(yolov11_precision_module_test PRIVATE rpp_inference)
+set_target_properties(yolov11_precision_module_test PROPERTIES
+    BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}"
+)
+
+add_executable(yolov11_box_decode_test EXCLUDE_FROM_ALL ${ROOT_DIRECTORY}/tests/test_box_decode.cpp)
+target_link_libraries(yolov11_box_decode_test PRIVATE rpp_inference)
+set_target_properties(yolov11_box_decode_test PROPERTIES BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}")
+
+add_executable(yolov11_model_support_test EXCLUDE_FROM_ALL ${ROOT_DIRECTORY}/tests/test_model_support.cpp)
+target_include_directories(yolov11_model_support_test PRIVATE ${RPP_INFERENCE_INCLUDE_DIR})
 
 add_library(rpp_yolov11_seg_postprocess SHARED
     ${ROOT_DIRECTORY}/rpp/postprocess/rpp_yolov11_seg_postprocessor.cpp
@@ -190,6 +238,10 @@ set_target_properties(yolov11_seg_yuv_frame_demo PROPERTIES
     BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}"
 )
 
+add_executable(yolov11_sequence_probe EXCLUDE_FROM_ALL ${ROOT_DIRECTORY}/tests/sequence_probe.cpp)
+target_link_libraries(yolov11_sequence_probe PRIVATE yolov11_seg_core ${OpenCV_LIBS})
+set_target_properties(yolov11_sequence_probe PROPERTIES BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}")
+
 add_executable(yolov11_seg_postprocess_test
     ${ROOT_DIRECTORY}/tests/postprocess_test.cpp
 )
@@ -204,6 +256,16 @@ target_link_libraries(yolov11_seg_postprocess_test PRIVATE rpp_yolov11_seg_postp
 set_target_properties(yolov11_seg_postprocess_test PROPERTIES
     BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}"
 )
+
+add_executable(yolov11_seg_inference_probe EXCLUDE_FROM_ALL tests/inference_probe.cpp)
+target_include_directories(yolov11_seg_inference_probe PRIVATE ${YOLO_UTILS_INCLUDE_DIR} ${RppRT_INCLUDE_DIRS} ${RPP_INFERENCE_INCLUDE_DIR})
+target_link_libraries(yolov11_seg_inference_probe PRIVATE rpp_inference yolov11_seg_utils ${rpprt_libs} pthread)
+set_target_properties(yolov11_seg_inference_probe PROPERTIES BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}")
+
+add_executable(yolov11_nms_compaction_test EXCLUDE_FROM_ALL tests/test_nms_compaction.cpp)
+target_include_directories(yolov11_nms_compaction_test PRIVATE ${RPP_POSTPROCESS_INCLUDE_DIR} ${RppRT_INCLUDE_DIRS})
+target_link_libraries(yolov11_nms_compaction_test PRIVATE rpp_yolov11_seg_postprocess ${rpprt_libs})
+set_target_properties(yolov11_nms_compaction_test PROPERTIES BUILD_RPATH "$ORIGIN/../lib;${RppRT_LIBS}")
 
 file(MAKE_DIRECTORY ${YOLO_BUILD_ASSETS_DIR})
 file(MAKE_DIRECTORY ${YOLO_BUILD_OUTPUT_DIR})

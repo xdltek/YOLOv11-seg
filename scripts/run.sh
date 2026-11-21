@@ -47,13 +47,28 @@ ensure_rpp_server() {
         return 0
     fi
 
+    mkdir -p "${build_dir}/logs"
+    local log_path="${build_dir}/logs/rpp_server.log"
+    # Large inference graphs need more than the SDK default 2068 graph events.
+    # Reserve 512 common events, leaving 3456 graph events out of 4096 total.
+    # Keep the installed SDK configuration and explicit user overrides intact.
+    if [[ -z "${RPP_CFG_FILE:-}" && -f /usr/local/rpp/etc/rpp_syscfg.ini ]]; then
+        mkdir -p "${build_dir}/config"
+        local config_path="${build_dir}/config/rpp_syscfg.ini"
+        local config_tmp
+        config_tmp="$(mktemp "${config_path}.XXXXXX")"
+        awk '/^[[:space:]]*glb_common_event[[:space:]]*=/ { print "glb_common_event=512"; next } { print }' \
+            /usr/local/rpp/etc/rpp_syscfg.ini > "${config_tmp}"
+        mv "${config_tmp}" "${config_path}"
+        export RPP_CFG_FILE="${config_path}"
+    fi
     if is_rpp_server_running; then
         echo "RPP server: already running"
         return 0
     fi
-
-    mkdir -p "${build_dir}/logs"
-    local log_path="${build_dir}/logs/rpp_server.log"
+    if [[ -n "${RPP_CFG_FILE:-}" ]]; then
+        echo "RPP server: configuration ${RPP_CFG_FILE}"
+    fi
     echo "RPP server: starting ${RPP_SERVER_BIN}"
     nohup "${RPP_SERVER_BIN}" > "${log_path}" 2>&1 &
     sleep 1

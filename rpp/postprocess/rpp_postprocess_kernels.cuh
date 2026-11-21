@@ -7,6 +7,18 @@
 
 #include <rpp_runtime.h>
 
+// Stable, threshold-only compaction. All pointers refer to SRAM; no host count
+// readback and no candidate truncation. Ping/pong/map each contain N int32s.
+void launch_yolov11_seg_compact_candidates(rtStream_t stream, const float* input,
+    float* output, int* ping, int* pong, int* map, int anchors, int classes, float threshold);
+
+// Four taps per axis compose the two reference bilinear resize operations.
+void launch_yolov11_seg_resample_probabilities(
+    rtStream_t stream, const float* probabilities, const int* tile_base, const int* tile_stride,
+    const int* tile_y, const int* tile_x, const int* tile_output, const int* tile_pixels,
+    const int* x_indices, const float* x_weights, const int* y_indices, const float* y_weights,
+    unsigned char* output, int scratch, int tiles, float threshold);
+
 /**
  * @brief Launch YOLOv11-SEG output split into detection head and mask coefficients.
  */
@@ -45,7 +57,7 @@ void launch_yolov11_seg_gather_selected_coefficients(rtStream_t stream,
                                                      int input_channels_first);
 
 /**
- * @brief Launch selected-mask prototype linear combination.
+ * @brief Launch prototype linear combination and sigmoid; raw_masks contains probabilities.
  */
 void launch_yolov11_seg_combine_prototypes(rtStream_t stream,
                                            const float* prototype,
@@ -56,7 +68,7 @@ void launch_yolov11_seg_combine_prototypes(rtStream_t stream,
                                            int prototype_height,
                                            int prototype_width);
 
-/** Combine only prototype pixels referenced by selected source-image ROIs. */
+/** Combine and sigmoid only prototype pixels referenced by selected source-image ROIs. */
 void launch_yolov11_seg_combine_prototypes_sparse(
     rtStream_t stream, const float* prototype, const float* coefficients,
     const int* point_segments, const int* point_proto_indices, float* packed_raw_masks,

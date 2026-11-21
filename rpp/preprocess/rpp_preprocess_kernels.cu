@@ -35,8 +35,6 @@ __global__ void letterbox_resize_norm_i420_kernel(const unsigned char* y_base,
 
     // Content-only launches already point at the top-left model tensor content offset.
     // This scalar branch removes padding predicates from the common optimized path.
-    float scale_x = static_cast<float>(input_width) / static_cast<float>(resized_width);
-    float scale_y = static_cast<float>(input_height) / static_cast<float>(resized_height);
     int sample_x = x;
     int sample_y = y;
     short inside = 1;
@@ -50,8 +48,10 @@ __global__ void letterbox_resize_norm_i420_kernel(const unsigned char* y_base,
         sample_y = rpp_min(rpp_max(rel_y, 0), resized_height - 1);
     }
 
-    int sx = static_cast<int>((static_cast<float>(sample_x) + 0.5f) * scale_x);
-    int sy = static_cast<int>((static_cast<float>(sample_y) + 0.5f) * scale_y);
+    // Exact center-nearest sampling. An approximate device reciprocal for
+    // 720/360 rounded below 2 and shifted every I420 sample by one source row.
+    int sx = ((2 * sample_x + 1) * input_width) / (2 * resized_width);
+    int sy = ((2 * sample_y + 1) * input_height) / (2 * resized_height);
     sx = rpp_min(rpp_max(sx, 0), input_width - 1);
     sy = rpp_min(rpp_max(sy, 0), input_height - 1);
 
@@ -122,13 +122,12 @@ __global__ void letterbox_resize_norm_hwc_kernel(const unsigned char* input,
     short inside = static_cast<short>((rel_x >= 0) & (rel_x < resized_width) &
                                       (rel_y >= 0) & (rel_y < resized_height));
 
-    // Compute source nearest-neighbor coordinates in the resized content area.
-    float scale_x = static_cast<float>(input_width) / static_cast<float>(resized_width);
-    float scale_y = static_cast<float>(input_height) / static_cast<float>(resized_height);
+    // Exact center-nearest coordinates, including integral downsampling ratios.
+    // A device reciprocal slightly below 1/2 otherwise shifts 1280x720 inputs.
     int sample_x = rpp_min(rpp_max(rel_x, 0), resized_width - 1);
     int sample_y = rpp_min(rpp_max(rel_y, 0), resized_height - 1);
-    int sx = static_cast<int>((static_cast<float>(sample_x) + 0.5f) * scale_x);
-    int sy = static_cast<int>((static_cast<float>(sample_y) + 0.5f) * scale_y);
+    int sx = ((2 * sample_x + 1) * input_width) / (2 * resized_width);
+    int sy = ((2 * sample_y + 1) * input_height) / (2 * resized_height);
     sx = rpp_min(rpp_max(sx, 0), input_width - 1);
     sy = rpp_min(rpp_max(sy, 0), input_height - 1);
 
@@ -162,12 +161,10 @@ __global__ void letterbox_resize_norm_chw_kernel(const unsigned char* input,
     short inside = static_cast<short>((rel_x >= 0) & (rel_x < resized_width) &
                                       (rel_y >= 0) & (rel_y < resized_height));
 
-    float scale_x = static_cast<float>(input_width) / static_cast<float>(resized_width);
-    float scale_y = static_cast<float>(input_height) / static_cast<float>(resized_height);
     int sample_x = rpp_min(rpp_max(rel_x, 0), resized_width - 1);
     int sample_y = rpp_min(rpp_max(rel_y, 0), resized_height - 1);
-    int sx = static_cast<int>((static_cast<float>(sample_x) + 0.5f) * scale_x);
-    int sy = static_cast<int>((static_cast<float>(sample_y) + 0.5f) * scale_y);
+    int sx = ((2 * sample_x + 1) * input_width) / (2 * resized_width);
+    int sy = ((2 * sample_y + 1) * input_height) / (2 * resized_height);
     sx = rpp_min(rpp_max(sx, 0), input_width - 1);
     sy = rpp_min(rpp_max(sy, 0), input_height - 1);
 
